@@ -1,0 +1,126 @@
+#!/usr/bin/env zsh
+set -euo pipefail
+
+# S'assure que les binaires Python utilisateur (comme `te`) sont dans le PATH
+for d in "$HOME"/Library/Python/*/bin(N); do export PATH="$d:$PATH"; done
+
+if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
+  echo "Usage: agent-rc <profile> [start|status|microskills|toolprune|refresh-catalog|restore|bypass]" >&2
+  echo "Profils disponibles: $(ls "$HOME/.config/agent-profiles" 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')" >&2
+  exit 1
+fi
+
+PROFILE="$1"
+ACTION="${2:-start}" # start | status | microskills | toolprune | refresh-catalog | restore | bypass
+PROFILE_FILE="$HOME/.config/agent-profiles/${PROFILE}.env"
+
+if [[ ! -f "$PROFILE_FILE" ]]; then
+  echo "Profile not found: $PROFILE_FILE" >&2
+  exit 1
+fi
+
+source "$PROFILE_FILE"
+
+# 0. Auto-bootstrap TokenEconomizer CLI path & symlink if not yet initialized by SessionStart hook
+export PATH="$HOME/.tokeneconomizer/bin:$PATH"
+TE_PLUGIN_BIN="$HOME/.local/share/claude-plugins/TokenEconomizer/plugin/bin/te"
+
+if [[ ! -x "$HOME/.tokeneconomizer/bin/te" && -f "$TE_PLUGIN_BIN" ]]; then
+  mkdir -p "$HOME/.tokeneconomizer/bin"
+  ln -sf "$TE_PLUGIN_BIN" "$HOME/.tokeneconomizer/bin/te"
+  chmod +x "$HOME/.tokeneconomizer/bin/te"
+fi
+
+# Subcommands to inspect or manage TokenEconomizer on this profile's repo without entering tmux
+case "$ACTION" in
+  status)
+    cd "$PROJECT_DIR" && te status
+    exit 0
+    ;;
+  microskills)
+    cd "$PROJECT_DIR" && te microskills
+    exit 0
+    ;;
+  toolprune)
+    cd "$PROJECT_DIR" && te toolprune
+    exit 0
+    ;;
+  refresh-catalog)
+    cd "$PROJECT_DIR" && te toolprune refresh-catalog
+    exit 0
+    ;;
+  restore)
+    cd "$PROJECT_DIR" && te toolprune restore
+    echo "Restored all pruned tools in $PROJECT_DIR/.claude/settings.local.json"
+    exit 0
+    ;;
+  bypass)
+    export TE_DISABLE=1
+    echo "TokenEconomizer disabled (TE_DISABLE=1) for this launch."
+    ;;
+  start)
+    export TE_DISABLE="${TE_DISABLE:-0}"
+    ;;
+  *)
+    echo "Usage: agent-rc [profile] [start|status|microskills|toolprune|refresh-catalog|restore|bypass]" >&2
+    exit 1
+    ;;
+esac
+
+# 1. Idempotency check: prevent .jsonl lock collision if tmux session already exists
+if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+  echo "Session '$SESSION_NAME' is already running (holding .jsonl lock)."
+  echo "  -> Attach session : tmux attach -t $SESSION_NAME"
+  echo "  -> TE status      : agent-rc $PROFILE status"
+  exit 0
+fi
+
+# 2. Build resume flag (--resume UUID or fallback to --continue)
+if [[ -n "${RESUME_UUID:-}" ]]; then
+  RESUME_FLAG="--resume '$RESUME_UUID'"
+else
+  RESUME_FLAG="--continue"
+fi
+
+# 3. macOS Seatbelt policy (sandbox-exec)
+# Allows writes ONLY to project dir, Claude state, TokenEconomizer state, Rust/Cargo caches, and temp dirs
+SEATBELT_POLICY="(version 1)
+(allow default)
+(deny file-write* (subpath \"$HOME\"))
+(allow file-write*
+  (subpath \"$PROJECT_DIR\")
+  (subpath \"$HOME/.claude\")
+  (subpath \"$HOME/.claude.json\")
+  (subpath \"$HOME/.tokeneconomizer\")
+  (subpath \"$HOME/.cargo\")
+  (subpath \"$HOME/.rustup\")
+  (subpath \"/tmp\")
+  (subpath \"/private/tmp\")
+  (subpath \"/private/var/folders\"))"
+
+# 4. Launch detached tmux with caffeinate + macOS Seatbelt filesystem restriction
+tmux new -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \
+  "export PATH=\"$HOME/.tokeneconomizer/bin:\$PATH\"; \
+   export TE_DISABLE='$TE_DISABLE'; \
+   source '$PROFILE_FILE'; \
+   caffeinate -is sandbox-exec -p '$SEATBELT_POLICY' \
+   ${AGENT_CMD:-claude} $RESUME_FLAG --remote-control '$RC_DISPLAY_NAME'; \
+   exec zsh"
+
+# 5. Répond automatiquement à la question "Resume / Start a new conversation"
+# (désactivable avec AUTO_RESUME=0 dans le profil). "1. Resume" est présélectionné.
+if [[ "${AUTO_RESUME:-1}" == "1" ]]; then
+  (
+    for _ in {1..40}; do
+      sleep 1
+      if tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null | grep -q "Resuming it will use"; then
+        tmux send-keys -t "$SESSION_NAME" Enter
+        break
+      fi
+    done
+  ) >/dev/null 2>&1 &!
+fi
+
+echo "Started '$SESSION_NAME' in background with Remote Control '$RC_DISPLAY_NAME'."
+echo "Check TokenEconomizer state anytime with: agent-rc $PROFILE status"
+
