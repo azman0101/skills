@@ -185,7 +185,8 @@ def load_policy():
 def policy_block(path, pol):
     if any(under(path, r) for r in pol["protect"]):
         return "trousseau protégé par la politique"
-    if any(under(path, h) for h in pol["home"]) and not any(under(path, z) for z in pol["allow"]):
+    if (any(under(path, h) for h in pol["home"]) and not any(under(path, z) for z in pol["allow"])
+            and not any(path == x or path.startswith(x + ".") for x in pol["allowprefix"])):
         return f"écriture hors des zones autorisées sous {pol['home'][0]}"
     return None
 
@@ -390,9 +391,12 @@ sb_path() {
 }
 # Écritures autorisées : projet, état Claude et TokenEconomizer, caches Rust/Cargo, dossiers temporaires,
 # journal des blocages (seul fichier d'état modifiable par l'agent) et EXTRA_WRITE_PATHS="chemin1:chemin2".
-WRITE_PATHS=("$PROJECT_DIR" "$HOME/.claude" "$HOME/.claude.json" "$HOME/.tokeneconomizer" "$HOME/.cargo" "$HOME/.rustup"
+WRITE_PATHS=("$PROJECT_DIR" "$HOME/.claude" "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/.tokeneconomizer" "$HOME/.cargo" "$HOME/.rustup"
   /tmp /private/tmp /private/var/folders "$STATE_DIR/blocks.jsonl")
 for _p in ${(s/:/)EXTRA_WRITE_PATHS:-}; do sb_path EXTRA_WRITE_PATHS "$_p"; WRITE_PATHS+=("$_p"); done
+# ~/.claude.json et ses fichiers frères (.claude.json.lock, .claude.json.tmp.<pid>.<hex>) : Claude Code écrit
+# ce fichier par verrou + fichier temporaire + renommage, un `subpath` du seul fichier ne les couvrirait pas.
+WRITE_PREFIXES=("$HOME/.claude.json")
 # 2c. Trousseaux protégés : AGENT_KEYCHAIN et PROTECTED_KEYCHAINS="fichier1:fichier2" (absolus).
 # Refuser la lecture du fichier empêche `security` de les interroger, même déverrouillés.
 PROTECT_PATHS=()
@@ -405,6 +409,10 @@ SEATBELT_POLICY="(version 1)
 (deny file-write* (subpath \"$HOME\"))
 (allow file-write*"
 for _p in "${WRITE_PATHS[@]}"; do SEATBELT_POLICY+=$'\n'"  (subpath \"$_p\")"; done
+for _p in "${WRITE_PREFIXES[@]}"; do   # chemin échappé pour une expression régulière
+  _re="$(print -rn -- "$_p" | sed 's/[^A-Za-z0-9_\/-]/\\&/g')"
+  SEATBELT_POLICY+=$'\n'"  (regex #\"^${_re}(\\..*)?\$\")"
+done
 SEATBELT_POLICY+=")"
 for _k in "${PROTECT_PATHS[@]}"; do SEATBELT_POLICY+=$'\n'"(deny file-read* file-write* (subpath \"$_k\"))"; done
 
@@ -412,7 +420,7 @@ for _k in "${PROTECT_PATHS[@]}"; do SEATBELT_POLICY+=$'\n'"(deny file-read* file
 # hors de portée d'écriture de l'agent. La consigne (DIAG_HINT=0 pour la désactiver) lui demande de vérifier
 # l'origine d'un échec d'outil, de prévenir l'utilisateur si c'est Seatbelt, et de ne pas contourner la sandbox.
 mkdir -p "$STATE_DIR"
-print -rl -- "home $HOME" "${WRITE_PATHS[@]/#/allow }" "${PROTECT_PATHS[@]/#/protect }" > "$STATE_DIR/policy.paths"
+print -rl -- "home $HOME" "${WRITE_PATHS[@]/#/allow }" "${WRITE_PREFIXES[@]/#/allowprefix }" "${PROTECT_PATHS[@]/#/protect }" > "$STATE_DIR/policy.paths"
 HINT_FLAG=""
 # La consigne n'est passée que si le premier mot d'AGENT_CMD est claude (option propre à Claude Code).
 if [[ "${DIAG_HINT:-1}" == "1" && "${${${AGENT_CMD:-claude}%% *}:t}" == "claude" ]]; then

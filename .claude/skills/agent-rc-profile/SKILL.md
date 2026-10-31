@@ -89,7 +89,8 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
 
 ## Limites à annoncer honnêtement
 
-- La sandbox ne restreint que les **écritures** (hors `PROJECT_DIR`, `~/.claude`, `~/.claude.json`,
+- La sandbox ne restreint que les **écritures** (hors `PROJECT_DIR`, `~/.claude`, `~/.claude.json` et ses
+  fichiers frères `.claude.json.lock` / `.claude.json.tmp.*`, `~/Library/Caches/claude-cli-nodejs`,
   `~/.tokeneconomizer`, `~/.cargo`, `~/.rustup`, `/tmp`, `/private/tmp`, `/private/var/folders`).
   Les **lectures** restent libres : `~/.ssh` ou le trousseau de connexion sont lisibles par l'agent.
   Ce n'est pas une protection contre l'exfiltration. Seuls les trousseaux dédiés déclarés

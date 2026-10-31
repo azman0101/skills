@@ -5,12 +5,12 @@ réel, et la conception (sans réalisation) d'un mode d'apprentissage.
 
 ## 1. À corriger
 
-- [ ] **Fichiers de verrou de `~/.claude.json` refusés.** `blocks` montre des refus répétés de `claude`
-  sur `~/.claude.json.lock` et `~/.claude.json.tmp.<pid>.<hex>`. La politique n'autorise que
-  `(subpath "$HOME/.claude.json")`, qui ne couvre ni le verrou ni les fichiers temporaires frères
-  (`subpath` = ce chemin et ses descendants). Piste : `(regex #"^$HOME/\.claude\.json(\..*)?$")`
-  dans la politique par défaut. Vérifier d'abord l'effet réel des refus (écritures retentées ? perdues ?).
-  Même famille : `~/Library/Caches/claude-cli-nodejs/...` (journaux MCP).
+- [x] **Fichiers de verrou de `~/.claude.json` refusés** — corrigé. La politique autorise maintenant
+  `~/.claude.json` et ses fichiers frères par une règle `regex` (`^<HOME>/\.claude\.json(\..*)?$`, chemin
+  échappé), ainsi que `~/Library/Caches/claude-cli-nodejs` (journaux MCP). `policy.paths` porte une ligne
+  `allowprefix` correspondante. Vérifié : `.claude.json`, `.lock` et `.tmp.*` passent ; `.claude.jsonX`,
+  `.claude.json2` et les autres fichiers restent refusés. À confirmer en conditions réelles :
+  `agent-rc <profil> blocks 15m` ne doit plus montrer de refus sur ces chemins après un redémarrage.
 
 ## 2. Issues du `/simplify`, non appliquées
 
