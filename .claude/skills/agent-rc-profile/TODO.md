@@ -91,3 +91,40 @@ agent-rc <profil> learn --reject <chemin> # ne plus proposer ce chemin
 - Valeurs de *N*, *M* et *k* : à calibrer sur les profils `ksm-migrator` et `frigate-labeler`.
 - Faut-il distinguer « autoriser l'écriture » de « laisser échouer, l'outil a un repli » ? Les refus de
   `~/.claude.json.lock` seraient peut-être à ignorer si Claude Code s'en accommode.
+
+## 4. Note de relève avant redémarrage (idée, non implémentée)
+
+**But.** Repartir d'une nouvelle conversation (`restart --fresh`) sans perdre l'historique du dépôt :
+juste avant le `/exit`, l'agent écrit une note de relève que la session suivante relit au démarrage.
+Avec `--continue`, la conversation est déjà conservée : la note sert surtout au cas `--fresh`.
+
+**Pourquoi pas `/recap` seul.** Dans cette version de Claude Code, `/recap` « génère un récapitulatif
+d'une ligne », affiché à l'écran sans rien écrire. Il ne s'exécute que si l'utilisateur le demande lui-même
+dans la session ; non vérifié : une frappe envoyée par `tmux send-keys` compte-t-elle comme telle ?
+Il vaut mieux envoyer à l'agent une consigne qui produit une note structurée : objectif, état
+d'avancement, décisions et leurs raisons, prochaines étapes, pièges rencontrés.
+
+**Proposition.**
+
+```sh
+agent-rc <profil> restart --handoff [--fresh]   # note de relève, puis /exit propre, puis relance
+```
+
+1. `restart` envoie la consigne à l'agent, puis attend qu'il ait fini (même contrôle d'inactivité que
+   `restart`, borné par un délai) avant d'envoyer `/exit`.
+2. La note est écrite dans un fichier dédié, pas dans `AGENTS.md` (dans `ksm-migrator`, c'est un protocole
+   d'audit pour relecteurs externes). Candidat : `.claude/handoff.md` dans le dépôt, à ajouter à
+   `.gitignore`.
+3. La consigne passée à l'agent par `--append-system-prompt` (celle de `DIAG_HINT`) est étendue :
+   « au démarrage, lis `.claude/handoff.md` ».
+4. À la relance, la note est relue par la nouvelle conversation.
+
+**À décider avant de coder.**
+- Où écrire : dans le dépôt (visible de l'agent, à ignorer par git) ou dans le dossier d'état hors du dépôt.
+- Un fichier unique écrasé à chaque fois, ou un historique daté avec rotation.
+- Seulement avec `--handoff`, ou aussi à chaque relance automatique par TTL (peu utile avec `--continue`).
+- `CLAUDE.md` vs `AGENTS.md` : à ma connaissance Claude Code lit `CLAUDE.md`, pas `AGENTS.md`
+  (non vérifié pour cette version) ; `ksm-migrator` n'a pas de `CLAUDE.md`.
+
+**Risques.** Agent en plein travail au moment de la consigne, note incomplète ou inexacte,
+fichier qui grossit sans limite, secrets ou chemins sensibles recopiés dans la note.
