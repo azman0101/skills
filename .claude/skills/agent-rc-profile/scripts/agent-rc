@@ -10,6 +10,7 @@ if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
   exit 1
 fi
 
+zmodload -F zsh/stat b:zstat   # zstat : indépendant du `stat` installé (BSD ou GNU)
 SELF="${0:A}"   # chemin absolu du script (dans une fonction zsh, $0 est le nom de la fonction)
 PROFILE="$1"
 [[ "$PROFILE" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] || { echo "Nom de profil invalide: $PROFILE" >&2; exit 1; }
@@ -322,7 +323,7 @@ session_idle() {   # aucune sortie du terminal ni écriture de la conversation d
   act="$(tmux display-message -p -t "$TMUX_TARGET" '#{window_activity}' 2>/dev/null || echo 0)"
   (( now - act >= need )) || return 1
   newest=("$HOME/.claude/projects/$(print -rn -- "$PROJECT_DIR" | sed -E 's/[^A-Za-z0-9]/-/g')"/*.jsonl(N.om[1]))
-  (( ${#newest} == 0 )) || (( now - $(stat -f %m "${newest[1]}") >= need )) || return 1
+  (( ${#newest} == 0 )) || (( now - $(zstat +mtime "${newest[1]}") >= need )) || return 1
 }
 
 restart_session() {   # $1 = 1 : nouvelle conversation ; $2 = 1 : même si la session est active
