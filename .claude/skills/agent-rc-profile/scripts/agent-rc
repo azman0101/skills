@@ -82,8 +82,17 @@ else
   RESUME_FLAG="--continue"
 fi
 
+# 2b. Chemins d'écriture supplémentaires du profil : EXTRA_WRITE_PATHS="chemin1:chemin2" (absolus, sans guillemet)
+EXTRA_RULES=""
+for _p in ${(s/:/)EXTRA_WRITE_PATHS:-}; do
+  [[ "$_p" == /* && "$_p" != *\"* && "$_p" != *\'* && "$_p" != *\\* ]] || { print -r -u2 -- "EXTRA_WRITE_PATHS: chemin refusé: $_p"; exit 1; }
+  EXTRA_RULES+="
+  (subpath \"$_p\")"
+done
+
 # 3. macOS Seatbelt policy (sandbox-exec)
-# Allows writes ONLY to project dir, Claude state, TokenEconomizer state, Rust/Cargo caches, and temp dirs
+# Allows writes ONLY to project dir, Claude state, TokenEconomizer state, Rust/Cargo caches, temp dirs
+# and the profile's EXTRA_WRITE_PATHS
 SEATBELT_POLICY="(version 1)
 (allow default)
 (deny file-write* (subpath \"$HOME\"))
@@ -96,7 +105,7 @@ SEATBELT_POLICY="(version 1)
   (subpath \"$HOME/.rustup\")
   (subpath \"/tmp\")
   (subpath \"/private/tmp\")
-  (subpath \"/private/var/folders\"))"
+  (subpath \"/private/var/folders\")$EXTRA_RULES)"
 
 # 4. Launch detached tmux with caffeinate + macOS Seatbelt filesystem restriction
 tmux new -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \

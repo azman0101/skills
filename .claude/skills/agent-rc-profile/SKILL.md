@@ -19,6 +19,9 @@ Un **profil = un dépôt = une session tmux**. Créer un profil, c'est écrire c
    - **secrets** : noms de variables et entrées Keychain (jamais les valeurs) ;
    - **télémétrie OTLP** : optionnelle, désactivée par défaut. N'en proposer aucun endpoint :
      l'utilisateur fournit le sien s'il a un collecteur (et dit si les prompts sont journalisés) ;
+   - **outils et caches** : la sandbox n'autorise l'écriture que pour Rust par défaut. Identifier
+     les outils du projet (kubectl, helm, aws, npm, uv, go…) et proposer `--write-path` pour leurs
+     seuls dossiers de cache, jamais pour un dossier d'identifiants entier ;
    - **micro-skills TokenEconomizer** : désactivés par défaut dans TokenEconomizer, ce skill les
      active en `envfacts` (apprentissage sans appel de modèle). Le mode `on` ajoute un modèle qui
      propose des faits toutes les 3 sessions, **coût imputé à la session** : ne le choisir que si
@@ -29,7 +32,7 @@ Un **profil = un dépôt = une session tmux**. Créer un profil, c'est écrire c
 ```bash
 bash <skill>/scripts/new-profile.sh <nom> --project-dir <dépôt> \
   [--secret VAR=SERVICE[:COMPTE]]... [--otlp URL [--log-prompts]] \
-  [--microskills envfacts|on|off|skip] [--resume UUID | --resume-latest] [--session N] [--rc-name N] [--agent-cmd C] [--force]
+  [--write-path CHEMIN]... [--microskills envfacts|on|off|skip] [--resume UUID | --resume-latest] [--session N] [--rc-name N] [--agent-cmd C] [--force]
 ```
 
    Il valide les entrées, résout les liens symboliques du dépôt, signale les collisions de
@@ -65,10 +68,13 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
   `~/.tokeneconomizer`, `~/.cargo`, `~/.rustup`, `/tmp`, `/private/tmp`, `/private/var/folders`).
   Les **lectures** restent libres : `~/.ssh` ou le trousseau sont lisibles par l'agent. Ce n'est
   pas une protection contre l'exfiltration.
-- Les chemins d'écriture autorisés sont codés en dur dans `agent-rc`, pensés pour Rust. Un projet
-  Node, Python (uv), Go, etc. échouera sur ses caches (`~/.npm`, `~/.cache/uv`, `~/go`…). Il n'y a
-  pas de variable de profil pour les étendre : l'ajouter demande de modifier le script `agent-rc`
-  (par ex. une variable `EXTRA_WRITE_PATHS`). Proposer ce changement, ne pas l'appliquer sans accord.
+- Par défaut, les chemins d'écriture autorisés sont ceux d'un projet Rust. Un projet Node, Python
+  (uv), Go, kubectl/helm/aws, etc. échouera sur ses caches (`~/.npm`, `~/.cache/uv`, `~/go`,
+  `~/.kube/cache`…). Les étendre se fait par profil : `--write-path` à la création, ou la variable
+  `EXTRA_WRITE_PATHS="/chemin1:/chemin2"` (absolus, séparés par `:`) dans le `.env`. Chaque chemin
+  ajouté élargit ce que l'agent peut modifier : ne jamais ajouter `$HOME`, et éviter `~/.ssh`,
+  `~/.gnupg`, `~/Library/Keychains` ou `~/.aws` en entier (le générateur avertit). Un changement
+  de profil ne s'applique qu'au prochain démarrage de la session.
 - Reprise automatique : `agent-rc` répond à la question « Resume / Start a new conversation »
   (conversation ancienne ou volumineuse) en envoyant Entrée via `tmux send-keys` dès que le texte
   `Resuming it will use` apparaît (40 s max). Elle dépend de ce libellé : après une mise à jour de

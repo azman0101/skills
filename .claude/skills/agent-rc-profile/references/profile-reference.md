@@ -12,6 +12,7 @@ puis une seconde fois dans le shell tmux.
 | `RC_DISPLAY_NAME` | Nom affiché par `--remote-control` | oui |
 | `AGENT_CMD` | Binaire lancé (défaut `claude`) | non |
 | `RESUME_UUID` | Si renseigné : `--resume UUID` ; vide : `--continue` | non |
+| `EXTRA_WRITE_PATHS` | Chemins absolus supplémentaires en écriture dans la sandbox, séparés par `:` (sans `'` `"` `\`). Absent ou vide : politique par défaut inchangée | non |
 | `AUTO_RESUME` | `1` (défaut) : valide automatiquement la question de reprise ; `0` : la laisse à l'utilisateur | non |
 | `TE_DISABLE` | `0` TokenEconomizer actif, `1` bypass (posé par l'action `bypass`) | non |
 
@@ -71,7 +72,8 @@ Elle est en revanche visible de l'agent lui-même (`env`), ce qui est voulu.
 |---|---|
 | `Profile not found` | mauvais nom, ou fichier hors de `~/.config/agent-profiles/` |
 | `Session ... already running` | normal : `tmux attach -t <SESSION_NAME>` |
-| L'agent démarre puis `Operation not permitted` à l'écriture | chemin hors liste d'écriture de la sandbox (cache npm/uv/go…) |
+| `EXTRA_WRITE_PATHS: chemin refusé` au lancement | chemin relatif, ou contenant `'` `"` `\` ; corriger le profil |
+| L'agent démarre puis `Operation not permitted` à l'écriture | chemin hors liste d'écriture de la sandbox (cache npm/uv/go…) : l'ajouter dans `EXTRA_WRITE_PATHS` (`--write-path`) et redémarrer la session |
 | Code 44 / `could not be found in the keychain` au lancement | entrée Keychain absente (service/compte) |
 | `te: command not found` | TokenEconomizer non installé; voir `~/.local/share/claude-plugins/TokenEconomizer` |
 | La question « Resume / Start a new conversation » reste affichée | libellé changé dans une nouvelle version de Claude Code (adapter le `grep` de `agent-rc`), ou `AUTO_RESUME=0` |

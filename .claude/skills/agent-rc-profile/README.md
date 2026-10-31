@@ -37,7 +37,8 @@ bash scripts/new-profile.sh mon-projet --project-dir ~/code/mon-projet \
   --secret API_KEY=mon-service --resume-latest --dry-run
 ```
 
-Options : `--session`, `--rc-name`, `--agent-cmd`, `--microskills envfacts|on|off|skip` (défaut `envfacts` :
+Options : `--session`, `--rc-name`, `--agent-cmd`, `--write-path CHEMIN` (répétable : dossiers supplémentaires en écriture dans la sandbox, par exemple
+les caches d'un outil), `--microskills envfacts|on|off|skip` (défaut `envfacts` :
 active les micro-skills TokenEconomizer du dépôt, désactivés par défaut chez eux, sans appel de
 modèle ; `on` ajoute un modèle toutes les 3 sessions, au coût de la session),
 `--resume UUID | --resume-latest`,
