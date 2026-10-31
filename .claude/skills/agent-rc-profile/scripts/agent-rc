@@ -10,6 +10,7 @@ if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
   exit 1
 fi
 
+SELF="${0:A}"   # chemin absolu du script (dans une fonction zsh, $0 est le nom de la fonction)
 PROFILE="$1"
 [[ "$PROFILE" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] || { echo "Nom de profil invalide: $PROFILE" >&2; exit 1; }
 ACTION="${2:-start}" # liste des actions : usage() plus bas
@@ -25,6 +26,9 @@ fi
 AGENT_SKIP_SECRETS=1
 source "$PROFILE_FILE"
 unset AGENT_SKIP_SECRETS
+
+# Cible tmux à correspondance exacte : `-t nom` accepte aussi un préfixe (claude-rc-x répondrait pour claude-rc-x-2).
+TMUX_TARGET="=$SESSION_NAME:"
 
 # État du diagnostic Seatbelt (politique, consigne, journal des blocages) : un dossier par profil
 STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent-rc}/$PROFILE"
@@ -43,7 +47,7 @@ fi
 # enregistrés au démarrage, signatures d'erreurs Claude Code. Le code Python n'est chargé qu'ici.
 diag() {
   command -v python3 >/dev/null || { echo "python3 requis pour $1" >&2; return 1; }
-  local pane; pane="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null || true)"
+  local pane; pane="$(tmux display-message -p -t "$TMUX_TARGET" '#{pane_pid}' 2>/dev/null || true)"
   python3 -I -c "$(cat <<'PYEOF'
 import collections, datetime, functools, json, os, re, subprocess, sys
 
@@ -300,13 +304,83 @@ PYEOF
 )" "$1" "$PROFILE" "$PROFILE_FILE" "$SESSION_NAME" "$STATE_DIR" "${pane:-0}" "${@:2}"
 }
 
+# Redémarrage propre : `/exit` (TokenEconomizer plie la session à sa fin), attente du `fold`, relance.
+# RESTART_TTL="8h" (0 = désactivé) relance automatiquement une session trop ancienne, mais seulement
+# quand elle est inactive depuis RESTART_IDLE ("5m"). Réglages du profil : RESTART_TTL, RESTART_IDLE,
+# RESTART_FRESH=1 (nouvelle conversation à chaque relance automatique au lieu de --continue).
+rlog() { mkdir -p "$STATE_DIR"; print -r -- "$(date '+%F %T') $*" >> "$STATE_DIR/restart.log"; }
+
+to_seconds() {   # 90s | 30m | 8h | 2d | 0 (sans unité : heures) -> secondes
+  [[ "$1" =~ '^([0-9]+)([smhd]?)$' ]] || return 1
+  local n="${match[1]}"
+  case "${match[2]:-h}" in s) echo $n ;; m) echo $((n*60)) ;; h) echo $((n*3600)) ;; d) echo $((n*86400)) ;; esac
+}
+
+session_idle() {   # aucune sortie du terminal ni écriture de la conversation depuis $1 secondes
+  local need="$1" now act newest
+  now="$(date +%s)"
+  act="$(tmux display-message -p -t "$TMUX_TARGET" '#{window_activity}' 2>/dev/null || echo 0)"
+  (( now - act >= need )) || return 1
+  newest=("$HOME/.claude/projects/$(print -rn -- "$PROJECT_DIR" | sed -E 's/[^A-Za-z0-9]/-/g')"/*.jsonl(N.om[1]))
+  (( ${#newest} == 0 )) || (( now - $(stat -f %m "${newest[1]}") >= need )) || return 1
+}
+
+restart_session() {   # $1 = 1 : nouvelle conversation ; $2 = 1 : même si la session est active
+  local fresh="$1" force="$2" idle t
+  idle="$(to_seconds "${RESTART_IDLE:-5m}")" || idle=300
+  if [[ -n "${TMUX:-}" && "$(tmux display-message -p '#S' 2>/dev/null)" == "$SESSION_NAME" ]]; then
+    echo "restart se lance depuis un terminal, pas depuis la session elle-même." >&2; return 1
+  fi
+  if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
+    if [[ "$force" != 1 ]] && ! session_idle "$idle"; then
+      echo "Session active il y a moins de ${RESTART_IDLE:-5m} : redémarrage différé (--force pour passer outre)." >&2; return 2
+    fi
+    echo "Arrêt propre de '$SESSION_NAME' (/exit)…"
+    tmux send-keys -t "$TMUX_TARGET" C-u
+    tmux send-keys -t "$TMUX_TARGET" -l '/exit'
+    tmux send-keys -t "$TMUX_TARGET" Enter
+    # Après /exit, le shell tmux reprend la main (`exec zsh`) : claude est terminé.
+    for (( t = 0; t < ${RESTART_EXIT_WAIT:-60}; t++ )); do
+      [[ "$(tmux display-message -p -t "$TMUX_TARGET" '#{pane_current_command}' 2>/dev/null)" == zsh ]] && break
+      sleep 1
+    done
+    if [[ "$(tmux display-message -p -t "$TMUX_TARGET" '#{pane_current_command}' 2>/dev/null)" != zsh ]]; then
+      [[ "$force" == 1 ]] || { echo "claude ne s'est pas arrêté : session laissée en l'état." >&2; rlog "échec: claude ne s'arrête pas sur /exit"; return 1; }
+      echo "claude ne s'est pas arrêté : arrêt forcé." >&2
+    fi
+    # Le fold de TokenEconomizer tourne en tâche détachée après SessionEnd : on l'attend (borné).
+    for (( t = 0; t < ${RESTART_FOLD_WAIT:-90}; t++ )); do
+      pgrep -f -- ' fold --session' >/dev/null 2>&1 || break
+      sleep 1
+    done
+    tmux kill-session -t "$TMUX_TARGET"
+  fi
+  rlog "redémarrage (nouvelle conversation: $fresh, forcé: ${force:-0})"
+  AGENT_FRESH="$fresh" "$SELF" "$PROFILE" start
+}
+
+ttl_watch() {   # tourne dans la session tmux "<session>-ttl", lancée par `start`
+  local ttl idle
+  ttl="$(to_seconds "${RESTART_TTL:-8h}")" || { echo "RESTART_TTL invalide: ${RESTART_TTL}" >&2; return 1; }
+  idle="$(to_seconds "${RESTART_IDLE:-5m}")" || idle=300
+  rlog "surveillance TTL démarrée (${RESTART_TTL:-8h}, inactivité requise ${RESTART_IDLE:-5m})"
+  while sleep "${RESTART_POLL:-60}"; do
+    tmux has-session -t "$TMUX_TARGET" 2>/dev/null || { rlog "session arrêtée : fin de la surveillance"; return 0; }
+    (( $(date +%s) - $(tmux display-message -p -t "$TMUX_TARGET" '#{session_created}') >= ttl )) || continue
+    session_idle "$idle" || continue   # occupée : nouvel essai au prochain passage
+    rlog "TTL atteint : redémarrage automatique"
+    restart_session "${RESTART_FRESH:-0}" 0 >> "$STATE_DIR/restart.log" 2>&1 || { rlog "échec du redémarrage automatique"; sleep 600; }
+  done
+}
+
 usage() {
   cat <<USAGE
-Usage: agent-rc $PROFILE [start|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]
+Usage: agent-rc $PROFILE [start|restart|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]
 
 Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
 
   agent-rc $PROFILE                    [écriture] démarre la session (tmux + sandbox + Remote Control)
+  agent-rc $PROFILE restart [--fresh] [--force] [écriture] /exit propre, attend le fold TokenEconomizer, relance (TTL auto : ${RESTART_TTL:-8h})
   agent-rc $PROFILE status             [lecture]  ce que TokenEconomizer a appris et fait sur le dépôt
   agent-rc $PROFILE logs [N]           [lecture]  les N dernières lignes (60 par défaut) de l'écran de la session
   agent-rc $PROFILE blocks [durée] [--all] [--total] [lecture+journal] refus Seatbelt de la fenêtre (défaut 1h) + statistiques
@@ -339,14 +413,26 @@ case "$ACTION" in
   logs)
     # Écran de la session tmux sans s'y attacher : agent-rc <profil> logs [lignes] (défaut 60)
     _n="${3:-60}"
-    tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo "Session '$SESSION_NAME' non démarrée." >&2; exit 1; }
+    tmux has-session -t "$TMUX_TARGET" 2>/dev/null || { echo "Session '$SESSION_NAME' non démarrée." >&2; exit 1; }
     [[ "$_n" == <-> ]] || { echo "logs: nombre de lignes attendu, reçu '$_n'" >&2; exit 1; }
-    tmux capture-pane -t "$SESSION_NAME" -p -S "-$_n" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+    tmux capture-pane -t "$TMUX_TARGET" -p -S "-$_n" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
     exit 0
     ;;
   blocks|why)
     diag "$ACTION" "${@:3}"
     exit 0
+    ;;
+  restart)
+    _fresh=0; _force=0
+    for _a in "${@:3}"; do
+      case "$_a" in --fresh) _fresh=1 ;; --force) _force=1 ;; *) echo "restart: option inconnue: $_a (--fresh, --force)" >&2; exit 1 ;; esac
+    done
+    restart_session "$_fresh" "$_force"
+    exit $?
+    ;;
+  ttl-watch)   # interne : lancé par `start`
+    ttl_watch
+    exit $?
     ;;
   restore)
     cd "$PROJECT_DIR" && te toolprune restore
@@ -368,7 +454,7 @@ case "$ACTION" in
 esac
 
 # 1. Idempotency check: prevent .jsonl lock collision if tmux session already exists
-if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
+if tmux has-session -t "$TMUX_TARGET" 2>/dev/null; then
   echo "Session '$SESSION_NAME' is already running (holding .jsonl lock)."
   echo "  -> Attach session : tmux attach -t $SESSION_NAME"
   echo "  -> TE status      : agent-rc $PROFILE status"
@@ -387,7 +473,9 @@ fi
 source "$PROFILE_FILE"
 
 # 2. Build resume flag (--resume UUID or fallback to --continue)
-if [[ -n "${RESUME_UUID:-}" ]]; then
+if [[ "${AGENT_FRESH:-0}" == 1 ]]; then
+  RESUME_FLAG=""   # nouvelle conversation (restart --fresh) : les faits TokenEconomizer appris sont réinjectés
+elif [[ -n "${RESUME_UUID:-}" ]]; then
   RESUME_FLAG="--resume '$RESUME_UUID'"
 else
   RESUME_FLAG="--continue"
@@ -453,14 +541,27 @@ tmux new -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \
    exec zsh"
 trap - EXIT   # le shell tmux reverrouille le coffre lui-même
 
+# 4b. Relance automatique (RESTART_TTL, 8h par défaut ; 0 = désactivée) : un second tmux surveille l'âge de la
+# session. Elle s'arrête d'elle-même quand la session est arrêtée à la main. Un coffre dédié se déverrouille
+# au clavier à chaque démarrage : pas de relance sans l'utilisateur.
+_ttl="$(to_seconds "${RESTART_TTL:-8h}")" || { echo "RESTART_TTL invalide: ${RESTART_TTL} (ex. 8h, 30m, 0)" >&2; _ttl=0; }
+if (( _ttl > 0 )); then
+  if [[ -n "${AGENT_KEYCHAIN:-}" ]]; then
+    echo "Relance automatique désactivée : le coffre ($AGENT_KEYCHAIN) se déverrouille à la main. Manuel : agent-rc $PROFILE restart"
+  elif ! tmux has-session -t "=$SESSION_NAME-ttl:" 2>/dev/null; then
+    tmux new -d -s "$SESSION_NAME-ttl" "exec ${(q)SELF} ${(q)PROFILE} ttl-watch"
+    echo "Relance automatique toutes les ${RESTART_TTL:-8h} d'ancienneté, session inactive (journal : $STATE_DIR/restart.log)."
+  fi
+fi
+
 # 5. Répond automatiquement à la question "Resume / Start a new conversation"
 # (désactivable avec AUTO_RESUME=0 dans le profil). "1. Resume" est présélectionné.
 if [[ "${AUTO_RESUME:-1}" == "1" ]]; then
   (
     for _ in {1..40}; do
       sleep 1
-      if tmux capture-pane -t "$SESSION_NAME" -p 2>/dev/null | grep -q "Resuming it will use"; then
-        tmux send-keys -t "$SESSION_NAME" Enter
+      if tmux capture-pane -t "$TMUX_TARGET" -p 2>/dev/null | grep -q "Resuming it will use"; then
+        tmux send-keys -t "$TMUX_TARGET" Enter
         break
       fi
     done

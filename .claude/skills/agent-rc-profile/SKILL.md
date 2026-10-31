@@ -80,6 +80,7 @@ Pour le détail des variables et des pièges de la sandbox, lire `references/pro
 | Voir l'écran de la session sans s'y attacher (60 lignes, ou N en 3e argument) | `agent-rc <p> logs [N]` |
 | Refus Seatbelt de la session + statistiques (journal `~/.local/state/agent-rc/<p>/blocks.jsonl`) | `agent-rc <p> blocks [durée] [--all] [--total]` (statistiques de la fenêtre ; `--total` : tout le journal) |
 | Un outil a échoué : sandbox ou Claude Code ? | `agent-rc <p> why "<message d'erreur>"` (verdict SEATBELT / CLAUDE / INDETERMINE) |
+| Redémarrage propre (`/exit`, attente du fold TokenEconomizer, relance) | `agent-rc <p> restart [--fresh] [--force]` |
 | Mettre à jour le catalogue d'outils | `agent-rc <p> refresh-catalog` |
 | Réafficher les outils masqués | `agent-rc <p> restore` |
 | Démarrer sans hooks | `agent-rc <p> bypass` (`TE_DISABLE=1`) |
@@ -121,6 +122,17 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
   (`InputValidationError`, permissions, hooks…). « Permission denied » (EACCES) vient des droits
   Unix, pas de Seatbelt. Dans le dossier d'état, seul le journal `blocks.jsonl` est inscriptible
   par l'agent (la politique et la consigne ne le sont pas) : il est indicatif, pas une preuve d'audit.
+- Redémarrage et TTL : TokenEconomizer n'apprend qu'à la fin d'une session (`SessionEnd` lance un
+  `te fold`) et injecte ses faits au démarrage ; une session tmux qui dure des jours n'apprend donc
+  rien. `restart` envoie `/exit`, attend la fin de `claude` puis du `fold`, tue la session et relance.
+  Il refuse une session active depuis moins de `RESTART_IDLE` (5 min) sans `--force`, et ne se lance
+  pas depuis la session elle-même. Au démarrage, `agent-rc` lance aussi un surveillant
+  (`<session>-ttl`) qui relance la session quand elle a plus de `RESTART_TTL` (8h par défaut, `0` =
+  désactivé) et qu'elle est inactive ; il s'arrête si la session est arrêtée à la main. Journal :
+  `~/.local/state/agent-rc/<profil>/restart.log`. **Limite** : une conversation reprise (`--continue`)
+  garde ses faits d'origine « mot pour mot » (cache du prompt) : seule une nouvelle conversation
+  (`restart --fresh`, ou `RESTART_FRESH=1` pour la relance automatique) reçoit les faits appris, au
+  prix du contexte. Un profil à coffre dédié n'est pas relancé automatiquement (déverrouillage au clavier).
 - Reprise automatique : `agent-rc` répond à la question « Resume / Start a new conversation »
   (conversation ancienne ou volumineuse) en envoyant Entrée via `tmux send-keys` dès que le texte
   `Resuming it will use` apparaît (40 s max). Elle dépend de ce libellé : après une mise à jour de

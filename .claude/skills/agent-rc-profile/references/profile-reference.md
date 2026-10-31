@@ -15,6 +15,9 @@ puis une seconde fois dans le shell tmux.
 | `AGENT_KEYCHAIN` | Coffre dédié (chemin absolu) d'où sont lus les secrets. `agent-rc` le déverrouille (mot de passe interactif), charge les secrets, le reverrouille, et interdit sa lecture à l'agent | non |
 | `PROTECTED_KEYCHAINS` | Autres trousseaux dédiés (chemins absolus séparés par `:`) dont la lecture est interdite à l'agent | non |
 | `EXTRA_WRITE_PATHS` | Chemins absolus supplémentaires en écriture dans la sandbox, séparés par `:` (sans `'` `"` `\`). Absent ou vide : politique par défaut inchangée | non |
+| `RESTART_TTL` | Âge de session au-delà duquel `agent-rc` la relance (`8h` par défaut ; `30m`, `2d`, `0` = jamais). Sans effet avec un coffre dédié | non |
+| `RESTART_IDLE` | Inactivité requise avant une relance (`5m` par défaut) | non |
+| `RESTART_FRESH` | `1` : la relance automatique démarre une nouvelle conversation au lieu de `--continue` | non |
 | `AUTO_RESUME` | `1` (défaut) : valide automatiquement la question de reprise ; `0` : la laisse à l'utilisateur | non |
 | `TE_DISABLE` | `0` TokenEconomizer actif, `1` bypass (posé par l'action `bypass`) | non |
 
@@ -98,5 +101,7 @@ mot de passe du coffre. Un profil ancien sans ce test charge ses secrets à chaq
 | L'agent démarre puis `Operation not permitted` à l'écriture | chemin hors liste d'écriture de la sandbox (cache npm/uv/go…) : l'ajouter dans `EXTRA_WRITE_PATHS` (`--write-path`) et redémarrer la session |
 | Code 44 / `could not be found in the keychain` au lancement | entrée Keychain absente (service/compte) |
 | `te: command not found` | TokenEconomizer non installé; voir `~/.local/share/claude-plugins/TokenEconomizer` |
+| `restart` : « redémarrage différé » | session active depuis moins de `RESTART_IDLE` ; attendre ou `--force` |
+| La session n'est jamais relancée seule | `RESTART_TTL=0`, coffre dédié, ou surveillant `<session>-ttl` absent (voir `restart.log`) |
 | La question « Resume / Start a new conversation » reste affichée | libellé changé dans une nouvelle version de Claude Code (adapter le `grep` de `agent-rc`), ou `AUTO_RESUME=0` |
 | L'agent s'arrête mais la session tmux reste | normal : `exec zsh` garde un shell ouvert; `tmux attach` pour lire l'erreur |
