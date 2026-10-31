@@ -54,6 +54,7 @@ PRED = 'eventMessage BEGINSWITH "Sandbox: " AND eventMessage CONTAINS " deny("'
 LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+\S+\s+kernel\S*\s+\(Sandbox\)\s+"
                   r"Sandbox: (.+?)\((\d+)\) deny\(\d+\) (\S+)(?: (.*))?$")
 SINCE = re.compile(r"^\d+[smhd]$")
+UNITS = {"s": "seconds", "m": "minutes", "h": "hours", "d": "days"}
 FIX = f"Si c'est légitime : ajouter le chemin à EXTRA_WRITE_PATHS dans {profile_file}, puis redémarrer la session."
 
 # Échecs qui viennent de Claude Code lui-même (validation d'outil, permissions, API) : pas de la sandbox.
@@ -201,10 +202,12 @@ def parent_key(path):
 
 
 def cmd_blocks():
-    since, show_all = "1h", False
+    since, show_all, total = "1h", False, False
     for a in args:
         if a == "--all":
             show_all = True
+        elif a == "--total":
+            total = True
         else:
             since = a
     journal = load()
@@ -213,25 +216,31 @@ def cmd_blocks():
         sys.exit("Journal système illisible ici (`log` refuse de tourner dans une sandbox) : lancez blocks depuis un terminal hors session.")
     new = save_new(events, journal)
     journal += new
-    attr = [e for e in events if e["attributed"]]
-    window = events if show_all else attr
-    unattr = len(events) - len(attr)
-    seat = [e for e in journal if e.get("source") == "seatbelt"]
-    fails = [e for e in journal if e.get("source") == "toolfail"]
+    # Les statistiques portent sur la fenêtre demandée ; --total les étend à tout le journal.
+    cutoff = (datetime.datetime.now() - datetime.timedelta(**{UNITS[since[-1]]: int(since[:-1])})).strftime("%Y-%m-%d %H:%M:%S")
+    pool = journal if total else [e for e in journal if e["ts"] >= cutoff]
+    if show_all and not total:
+        pool = pool + [e for e in events if not e["attributed"]]
+    seat = [e for e in pool if e.get("source") == "seatbelt"]
+    fails = [e for e in pool if e.get("source") == "toolfail"]
+    unattr = sum(1 for e in events if not e["attributed"])
+    scope = "tout le journal" if total else f"fenêtre {since}"
     print(f"Profil {profile} — session {session}")
-    print(f"Fenêtre {since} : {len(attr)} refus Seatbelt attribués à la session ({len(new)} nouveaux), {unattr} non attribués"
+    print(f"Fenêtre {since} : {len(events) - unattr} refus Seatbelt attribués à la session ({len(new)} nouveaux), {unattr} non attribués"
           + ("" if show_all or not unattr else " (autres applications ou processus terminés : --all pour les voir)"))
-    print(f"Journal {JOURNAL} : {len(seat)} refus Seatbelt, {len(fails)} échecs d'outil analysés\n")
+    print(f"Statistiques ({scope}) : {len(seat)} refus Seatbelt, {len(fails)} échecs d'outil analysés"
+          + ("" if total else f" — journal complet : {sum(1 for e in journal if e.get('source') == 'seatbelt')} refus, --total pour les inclure")
+          + f"\nJournal : {JOURNAL}\n")
     print("Refus par opération :\n" + top(collections.Counter(e["op"] for e in seat)))
     print("\nRefus par processus :\n" + top(collections.Counter(e["proc"] for e in seat)))
     print("\nDossiers les plus bloqués :\n" + top(collections.Counter(parent_key(e["path"]) for e in seat)))
     print("\nÉchecs d'outil par verdict :\n" + top(collections.Counter(e["verdict"] for e in fails)))
-    print(f"\nDerniers refus de la fenêtre ({'tous' if show_all else 'attribués'}) :")
-    for e in window[-10:]:
+    print(f"\nDerniers refus ({scope}, {'tous' if show_all else 'attribués'}) :")
+    for e in seat[-10:]:
         print("  " + fmt(e) + ("" if e["attributed"] else "  [non attribué]"))
-    if not window:
+    if not seat:
         print("  (aucun)")
-    if seat:
+    elif any(e["path"] for e in seat):
         print("\n" + FIX)
 
 
@@ -300,7 +309,7 @@ Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
   agent-rc $PROFILE                    [écriture] démarre la session (tmux + sandbox + Remote Control)
   agent-rc $PROFILE status             [lecture]  ce que TokenEconomizer a appris et fait sur le dépôt
   agent-rc $PROFILE logs [N]           [lecture]  les N dernières lignes (60 par défaut) de l'écran de la session
-  agent-rc $PROFILE blocks [durée|--all] [lecture+journal] refus Seatbelt de la session (défaut 1h) + statistiques
+  agent-rc $PROFILE blocks [durée] [--all] [--total] [lecture+journal] refus Seatbelt de la fenêtre (défaut 1h) + statistiques
   agent-rc $PROFILE why "<erreur>"     [lecture+journal] cet échec d'outil vient-il de Seatbelt ou de Claude Code ?
   agent-rc $PROFILE microskills        [lecture]  les faits du dépôt injectés au démarrage
   agent-rc $PROFILE toolprune          [lecture]  outils retirés des sessions et propositions en attente
