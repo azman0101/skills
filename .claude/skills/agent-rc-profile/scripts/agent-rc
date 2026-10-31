@@ -5,13 +5,14 @@ set -euo pipefail
 for d in "$HOME"/Library/Python/*/bin(N); do export PATH="$d:$PATH"; done
 
 if [[ $# -lt 1 || "$1" == "-h" || "$1" == "--help" ]]; then
-  echo "Usage: agent-rc <profile> [start|status|microskills|toolprune|refresh-catalog|restore|bypass]" >&2
-  echo "Profils disponibles: $(ls "$HOME/.config/agent-profiles" 2>/dev/null | sed 's/\.env$//' | tr '\n' ' ')" >&2
+  echo "Usage: agent-rc <profile> [action]   (actions et exemples : agent-rc <profile> --help)" >&2
+  echo "Profils disponibles: $(print -rl -- "$HOME"/.config/agent-profiles/*.env(N:t:r) | tr '\n' ' ')" >&2
   exit 1
 fi
 
 PROFILE="$1"
-ACTION="${2:-start}" # start | status | microskills | toolprune | refresh-catalog | restore | bypass
+[[ "$PROFILE" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*$' ]] || { echo "Nom de profil invalide: $PROFILE" >&2; exit 1; }
+ACTION="${2:-start}" # liste des actions : usage() plus bas
 PROFILE_FILE="$HOME/.config/agent-profiles/${PROFILE}.env"
 
 if [[ ! -f "$PROFILE_FILE" ]]; then
@@ -19,7 +20,14 @@ if [[ ! -f "$PROFILE_FILE" ]]; then
   exit 1
 fi
 
+# Les profils récents ne lisent leurs secrets que si AGENT_SKIP_SECRETS est vide : status,
+# microskills… n'ont pas à toucher au Keychain. Les secrets sont chargés à l'étape 1b.
+AGENT_SKIP_SECRETS=1
 source "$PROFILE_FILE"
+unset AGENT_SKIP_SECRETS
+
+# État du diagnostic Seatbelt (politique, consigne, journal des blocages) : un dossier par profil
+STATE_DIR="${AGENT_STATE_DIR:-$HOME/.local/state/agent-rc}/$PROFILE"
 
 # 0. Auto-bootstrap TokenEconomizer CLI path & symlink if not yet initialized by SessionStart hook
 export PATH="$HOME/.tokeneconomizer/bin:$PATH"
@@ -31,22 +39,303 @@ if [[ ! -x "$HOME/.tokeneconomizer/bin/te" && -f "$TE_PLUGIN_BIN" ]]; then
   chmod +x "$HOME/.tokeneconomizer/bin/te"
 fi
 
+# Diagnostic des blocages (actions blocks et why) : journal système Seatbelt, chemins de la politique
+# enregistrés au démarrage, signatures d'erreurs Claude Code. Le code Python n'est chargé qu'ici.
+diag() {
+  command -v python3 >/dev/null || { echo "python3 requis pour $1" >&2; return 1; }
+  local pane; pane="$(tmux display-message -p -t "$SESSION_NAME" '#{pane_pid}' 2>/dev/null || true)"
+  python3 -I -c "$(cat <<'PYEOF'
+import collections, datetime, functools, json, os, re, subprocess, sys
+
+mode, profile, profile_file, session, state_dir, pane_pid = sys.argv[1:7]
+args = sys.argv[7:]
+JOURNAL = os.path.join(state_dir, "blocks.jsonl")
+PRED = 'eventMessage BEGINSWITH "Sandbox: " AND eventMessage CONTAINS " deny("'
+LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d+)\s+\S+\s+kernel\S*\s+\(Sandbox\)\s+"
+                  r"Sandbox: (.+?)\((\d+)\) deny\(\d+\) (\S+)(?: (.*))?$")
+SINCE = re.compile(r"^\d+[smhd]$")
+FIX = f"Si c'est légitime : ajouter le chemin à EXTRA_WRITE_PATHS dans {profile_file}, puis redémarrer la session."
+
+# Échecs qui viennent de Claude Code lui-même (validation d'outil, permissions, API) : pas de la sandbox.
+CLAUDE_PATTERNS = [
+    (r"InputValidationError", "paramètres d'outil invalides"),
+    (r"schema was not sent|ToolSearch", "schéma d'outil non chargé (ToolSearch requis)"),
+    (r"<tool_use_error>", "erreur d'utilisation d'outil"),
+    (r"No such tool available|Unknown tool|Tool .{0,60}(not found|is not available)", "outil inconnu ou indisponible"),
+    (r"Permission to use .{0,80}(has been )?denied|was denied|doesn'?t want to proceed|permission request", "règle de permission Claude Code"),
+    (r"[Hh]ook .{0,60}(blocked|denied)|blocked by .{0,30}hook", "hook Claude Code"),
+    (r"File has not been read yet|File has been modified since|String to replace not found|old_string", "validation de l'outil Edit/Write"),
+    (r"API Error|overloaded_error|rate.?limit", "API Anthropic"),
+]
+EPERM = re.compile(r"operation not permitted|\(os error 1\)|\bEPERM\b|Sandbox: ", re.I)   # zsh l'écrit en minuscules
+
+
+def load():
+    out = []
+    try:
+        with open(JOURNAL, encoding="utf-8") as f:
+            for l in f:
+                try:
+                    out.append(json.loads(l))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return out
+
+
+def append(entries):
+    if not entries:
+        return
+    try:
+        with open(JOURNAL, "a", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e, ensure_ascii=False) + "\n")
+    except OSError as e:
+        print(f"(journal non écrit : {e})", file=sys.stderr)
+
+
+@functools.lru_cache(maxsize=None)
+def real(p):
+    p = os.path.expanduser(p)
+    return os.path.realpath(p) if p.startswith("/") else p
+
+
+def under(p, root):
+    return p == root or p.startswith(root.rstrip("/") + "/")
+
+
+def age(e):
+    return (datetime.datetime.now() - datetime.datetime.strptime(e["ts"][:19], "%Y-%m-%d %H:%M:%S")).total_seconds()
+
+
+def fmt(e):
+    return f"{e['ts'][:19]}  {e['proc']}({e['pid']})  {e['op']}  {e['path']}"
+
+
+def descendants(root):
+    if not root.isdigit() or int(root) <= 1:
+        return set()
+    try:
+        out = subprocess.run(["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True).stdout
+    except OSError:   # ps n'est pas exécutable depuis la sandbox : pas d'attribution par arbre de processus
+        return set()
+    kids = collections.defaultdict(list)
+    for l in out.splitlines():
+        a = l.split()
+        if len(a) == 2 and a[0].isdigit() and a[1].isdigit():
+            kids[int(a[1])].append(int(a[0]))
+    seen, stack = {int(root)}, [int(root)]
+    while stack:
+        for c in kids[stack.pop()]:
+            if c not in seen:
+                seen.add(c)
+                stack.append(c)
+    return seen
+
+
+def collect(since):
+    """Refus Seatbelt de la fenêtre, attribués à la session par l'arbre de processus de son pane tmux."""
+    if not SINCE.match(since):
+        sys.exit(f"durée invalide : {since!r} (ex. 30m, 2h, 1d)")
+    try:
+        r = subprocess.run(["/usr/bin/log", "show", "--last", since, "--style", "compact", "--predicate", PRED],
+                           capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        r = None
+    if r is None or r.returncode:   # `log` refuse de tourner dans une sandbox (« Cannot run while sandboxed »)
+        return None
+    out = r.stdout
+    live, events = None, []
+    for l in out.splitlines():
+        m = LINE.match(l)
+        if not m:
+            continue
+        if live is None:
+            live = descendants(pane_pid)
+        pid = int(m.group(3))
+        events.append({"ts": m.group(1), "source": "seatbelt", "proc": m.group(2), "pid": pid,
+                       "op": m.group(4), "path": m.group(5) or "", "attributed": pid in live})
+    return events
+
+
+def save_new(events, journal):
+    """Ajoute au journal les refus attribués pas encore enregistrés ; renvoie ces nouveaux refus."""
+    key = lambda e: (e.get("ts"), e.get("pid"), e.get("op"), e.get("path"))
+    seen = {key(e) for e in journal}
+    new = [e for e in events if e["attributed"] and key(e) not in seen]
+    append(new)
+    return new
+
+
+def load_policy():
+    """Chemins de la politique Seatbelt enregistrés au démarrage par agent-rc (policy.paths)."""
+    pol = collections.defaultdict(list)
+    try:
+        with open(os.path.join(state_dir, "policy.paths"), encoding="utf-8") as f:
+            for l in f:
+                kind, _, p = l.rstrip("\n").partition(" ")
+                if p:
+                    pol[kind].append(real(p))
+    except OSError:
+        pass
+    return pol
+
+
+def policy_block(path, pol):
+    if any(under(path, r) for r in pol["protect"]):
+        return "trousseau protégé par la politique"
+    if any(under(path, h) for h in pol["home"]) and not any(under(path, z) for z in pol["allow"]):
+        return f"écriture hors des zones autorisées sous {pol['home'][0]}"
+    return None
+
+
+def top(counter, n=6):
+    return "\n".join(f"  {c:5d}  {k}" for k, c in counter.most_common(n)) or "  (aucun)"
+
+
+def parent_key(path):
+    parts = [p for p in path.split("/") if p]
+    return "/" + "/".join(parts[:4]) if parts else "(sans chemin)"
+
+
+def cmd_blocks():
+    since, show_all = "1h", False
+    for a in args:
+        if a == "--all":
+            show_all = True
+        else:
+            since = a
+    journal = load()
+    events = collect(since)
+    if events is None:
+        sys.exit("Journal système illisible ici (`log` refuse de tourner dans une sandbox) : lancez blocks depuis un terminal hors session.")
+    new = save_new(events, journal)
+    journal += new
+    attr = [e for e in events if e["attributed"]]
+    window = events if show_all else attr
+    unattr = len(events) - len(attr)
+    seat = [e for e in journal if e.get("source") == "seatbelt"]
+    fails = [e for e in journal if e.get("source") == "toolfail"]
+    print(f"Profil {profile} — session {session}")
+    print(f"Fenêtre {since} : {len(attr)} refus Seatbelt attribués à la session ({len(new)} nouveaux), {unattr} non attribués"
+          + ("" if show_all or not unattr else " (autres applications ou processus terminés : --all pour les voir)"))
+    print(f"Journal {JOURNAL} : {len(seat)} refus Seatbelt, {len(fails)} échecs d'outil analysés\n")
+    print("Refus par opération :\n" + top(collections.Counter(e["op"] for e in seat)))
+    print("\nRefus par processus :\n" + top(collections.Counter(e["proc"] for e in seat)))
+    print("\nDossiers les plus bloqués :\n" + top(collections.Counter(parent_key(e["path"]) for e in seat)))
+    print("\nÉchecs d'outil par verdict :\n" + top(collections.Counter(e["verdict"] for e in fails)))
+    print(f"\nDerniers refus de la fenêtre ({'tous' if show_all else 'attribués'}) :")
+    for e in window[-10:]:
+        print("  " + fmt(e) + ("" if e["attributed"] else "  [non attribué]"))
+    if not window:
+        print("  (aucun)")
+    if seat:
+        print("\n" + FIX)
+
+
+def cmd_why():
+    text = " ".join(args) if args else (sys.stdin.read() if not sys.stdin.isatty() else "")
+    if not text.strip():
+        sys.exit("usage : agent-rc %s why \"<message d'erreur de l'outil>\"   (ou message sur l'entrée standard)" % profile)
+    claude = next((why for pat, why in CLAUDE_PATTERNS if re.search(pat, text)), None)
+    eperm = bool(EPERM.search(text))
+    paths = {real(p.rstrip(".")) for p in re.findall(r"(?:~|/)[^\s'\"`:,;()<>]+", text)} - {"/"}
+    pol = load_policy()
+    blocked = [(p, r) for p in sorted(paths) for r in [policy_block(p, pol)] if r]
+    verdict, conf, what, ev, log_ok = "INDETERMINE", "-", None, [], True
+    if claude and not eperm:
+        verdict, conf, ev = "CLAUDE", "haute", [f"signature : {claude}"]
+    elif eperm and blocked:
+        # Preuve par la politique : pas besoin du journal système (lent, et lacunaire).
+        verdict, conf, what = "SEATBELT", "haute", f"l'accès à {blocked[0][0]}"
+        ev = [f"{p} : {r} (politique enregistrée au démarrage)" for p, r in blocked[:3]]
+    elif eperm or paths:
+        journal = load()
+        events = collect("15m")
+        log_ok = events is not None
+        events = events or []
+        save_new(events, journal)
+        match = [e for e in events if e["path"] and any(under(p, real(e["path"])) or under(real(e["path"]), p) for p in paths)]
+        near = [e for e in events if e["attributed"] and age(e) < 120]
+        if match:
+            verdict, conf, what = "SEATBELT", "haute", f"{match[-1]['op']} sur {match[-1]['path']}"
+            ev = ["refus Seatbelt " + fmt(e) for e in match[-3:]]
+        elif eperm and near:
+            verdict, conf, what = "SEATBELT", "moyenne", f"{near[-1]['op']} sur {near[-1]['path']}"
+            ev = ["« Operation not permitted » + refus récent " + fmt(e) for e in near[-3:]]
+    if verdict == "INDETERMINE" and claude:
+        verdict, conf, ev = "CLAUDE", "moyenne", [f"signature : {claude}"]
+    elif verdict == "INDETERMINE":
+        ev = [("aucun refus Seatbelt correspondant dans les 15 dernières minutes" if log_ok else
+               "journal système illisible ici (`log` refuse de tourner dans une sandbox) ; vérifier hors session avec agent-rc %s blocks" % profile)
+              + ", aucune signature d'erreur Claude Code"
+              + (" ; « Operation not permitted » seul peut venir de SIP ou de flags de fichier" if eperm else
+                 " ; « Permission denied » (EACCES) vient des droits Unix, pas de Seatbelt")]
+    append([{"ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.000"), "source": "toolfail", "verdict": verdict,
+             "confidence": conf, "message": " ".join(text.split())[:300]}])
+    print(f"VERDICT: {verdict} (confiance {conf})")
+    for e in ev:
+        print(f"  - {e}")
+    if verdict == "SEATBELT":
+        print(f"À DIRE À L'UTILISATEUR : la sandbox macOS (Seatbelt) du profil {profile} a bloqué {what}. {FIX} Ne pas contourner la sandbox.")
+    elif verdict == "CLAUDE":
+        print("Cause : erreur de l'outil côté Claude Code, pas la sandbox. Corriger l'appel (ex. charger le schéma avec ToolSearch) et réessayer.")
+    else:
+        print("Cause non établie : ne pas affirmer que la sandbox est en cause. Détail : agent-rc %s blocks" % profile)
+
+
+{"blocks": cmd_blocks, "why": cmd_why}[mode]()
+PYEOF
+)" "$1" "$PROFILE" "$PROFILE_FILE" "$SESSION_NAME" "$STATE_DIR" "${pane:-0}" "${@:2}"
+}
+
+usage() {
+  cat <<USAGE
+Usage: agent-rc $PROFILE [start|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]
+
+Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
+
+  agent-rc $PROFILE                    [écriture] démarre la session (tmux + sandbox + Remote Control)
+  agent-rc $PROFILE status             [lecture]  ce que TokenEconomizer a appris et fait sur le dépôt
+  agent-rc $PROFILE logs [N]           [lecture]  les N dernières lignes (60 par défaut) de l'écran de la session
+  agent-rc $PROFILE blocks [durée|--all] [lecture+journal] refus Seatbelt de la session (défaut 1h) + statistiques
+  agent-rc $PROFILE why "<erreur>"     [lecture+journal] cet échec d'outil vient-il de Seatbelt ou de Claude Code ?
+  agent-rc $PROFILE microskills        [lecture]  les faits du dépôt injectés au démarrage
+  agent-rc $PROFILE toolprune          [lecture]  outils retirés des sessions et propositions en attente
+  agent-rc $PROFILE refresh-catalog    [écriture] relit le catalogue d'outils (état TokenEconomizer)
+  agent-rc $PROFILE restore            [écriture] rend tous les outils retirés (.claude/settings.local.json)
+  agent-rc $PROFILE bypass             [écriture] démarre la session avec TokenEconomizer désactivé
+
+Autres commandes utiles :
+
+  tmux attach -t $SESSION_NAME         s'attacher à la session (détacher : Ctrl-b puis d)
+  tmux kill-session -t $SESSION_NAME   arrêter la session
+USAGE
+}
+
 # Subcommands to inspect or manage TokenEconomizer on this profile's repo without entering tmux
 case "$ACTION" in
-  status)
-    cd "$PROJECT_DIR" && te status
+  -h|--help|help)
+    usage
     exit 0
     ;;
-  microskills)
-    cd "$PROJECT_DIR" && te microskills
-    exit 0
-    ;;
-  toolprune)
-    cd "$PROJECT_DIR" && te toolprune
-    exit 0
+  status|microskills|toolprune)
+    cd "$PROJECT_DIR" && exec te "$ACTION"
     ;;
   refresh-catalog)
-    cd "$PROJECT_DIR" && te toolprune refresh-catalog
+    cd "$PROJECT_DIR" && exec te toolprune refresh-catalog
+    ;;
+  logs)
+    # Écran de la session tmux sans s'y attacher : agent-rc <profil> logs [lignes] (défaut 60)
+    _n="${3:-60}"
+    tmux has-session -t "$SESSION_NAME" 2>/dev/null || { echo "Session '$SESSION_NAME' non démarrée." >&2; exit 1; }
+    [[ "$_n" == <-> ]] || { echo "logs: nombre de lignes attendu, reçu '$_n'" >&2; exit 1; }
+    tmux capture-pane -t "$SESSION_NAME" -p -S "-$_n" | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}'
+    exit 0
+    ;;
+  blocks|why)
+    diag "$ACTION" "${@:3}"
     exit 0
     ;;
   restore)
@@ -62,7 +351,8 @@ case "$ACTION" in
     export TE_DISABLE="${TE_DISABLE:-0}"
     ;;
   *)
-    echo "Usage: agent-rc [profile] [start|status|microskills|toolprune|refresh-catalog|restore|bypass]" >&2
+    echo "Action inconnue: $ACTION" >&2
+    usage >&2
     exit 1
     ;;
 esac
@@ -75,6 +365,17 @@ if tmux has-session -t "$SESSION_NAME" 2>/dev/null; then
   exit 0
 fi
 
+# 1b. Coffre dédié (AGENT_KEYCHAIN) : déverrouillage interactif, puis chargement des secrets.
+# Un échec de lecture arrête agent-rc avant de lancer tmux. Le coffre est reverrouillé à toute
+# sortie anticipée ; en fonctionnement normal, c'est le shell tmux qui le reverrouille après lecture.
+if [[ -n "${AGENT_KEYCHAIN:-}" ]]; then
+  [[ -f "$AGENT_KEYCHAIN" ]] || { echo "Coffre introuvable: $AGENT_KEYCHAIN (voir scripts/vault.sh init)" >&2; exit 1; }
+  trap 'security lock-keychain "$AGENT_KEYCHAIN" >/dev/null 2>&1 || true' EXIT
+  echo "Déverrouillage du coffre: $AGENT_KEYCHAIN"
+  security unlock-keychain "$AGENT_KEYCHAIN"
+fi
+source "$PROFILE_FILE"
+
 # 2. Build resume flag (--resume UUID or fallback to --continue)
 if [[ -n "${RESUME_UUID:-}" ]]; then
   RESUME_FLAG="--resume '$RESUME_UUID'"
@@ -82,39 +383,58 @@ else
   RESUME_FLAG="--continue"
 fi
 
-# 2b. Chemins d'écriture supplémentaires du profil : EXTRA_WRITE_PATHS="chemin1:chemin2" (absolus, sans guillemet)
-EXTRA_RULES=""
-for _p in ${(s/:/)EXTRA_WRITE_PATHS:-}; do
-  [[ "$_p" == /* && "$_p" != *\"* && "$_p" != *\'* && "$_p" != *\\* ]] || { print -r -u2 -- "EXTRA_WRITE_PATHS: chemin refusé: $_p"; exit 1; }
-  EXTRA_RULES+="
-  (subpath \"$_p\")"
-done
+# 2b. Chemins de la politique Seatbelt. Chacun est inséré entre guillemets dans la politique,
+# elle-même entre apostrophes dans la commande tmux : ces caractères la casseraient.
+sb_path() {
+  [[ "$2" == /* && "$2" != *[\"\'\\$'\n']* ]] || { print -r -u2 -- "$1: chemin refusé: $2"; exit 1; }
+}
+# Écritures autorisées : projet, état Claude et TokenEconomizer, caches Rust/Cargo, dossiers temporaires,
+# journal des blocages (seul fichier d'état modifiable par l'agent) et EXTRA_WRITE_PATHS="chemin1:chemin2".
+WRITE_PATHS=("$PROJECT_DIR" "$HOME/.claude" "$HOME/.claude.json" "$HOME/.tokeneconomizer" "$HOME/.cargo" "$HOME/.rustup"
+  /tmp /private/tmp /private/var/folders "$STATE_DIR/blocks.jsonl")
+for _p in ${(s/:/)EXTRA_WRITE_PATHS:-}; do sb_path EXTRA_WRITE_PATHS "$_p"; WRITE_PATHS+=("$_p"); done
+# 2c. Trousseaux protégés : AGENT_KEYCHAIN et PROTECTED_KEYCHAINS="fichier1:fichier2" (absolus).
+# Refuser la lecture du fichier empêche `security` de les interroger, même déverrouillés.
+PROTECT_PATHS=()
+for _k in ${(s/:/)PROTECTED_KEYCHAINS:-} ${AGENT_KEYCHAIN:-}; do sb_path PROTECTED_KEYCHAINS "$_k"; PROTECT_PATHS+=("$_k"); done
 
-# 3. macOS Seatbelt policy (sandbox-exec)
-# Allows writes ONLY to project dir, Claude state, TokenEconomizer state, Rust/Cargo caches, temp dirs
-# and the profile's EXTRA_WRITE_PATHS
+# 3. macOS Seatbelt policy (sandbox-exec). Les trousseaux protégés restent refusés en lecture ET en
+# écriture, même si un chemin d'EXTRA_WRITE_PATHS les recouvre (la règle deny vient après).
 SEATBELT_POLICY="(version 1)
 (allow default)
 (deny file-write* (subpath \"$HOME\"))
-(allow file-write*
-  (subpath \"$PROJECT_DIR\")
-  (subpath \"$HOME/.claude\")
-  (subpath \"$HOME/.claude.json\")
-  (subpath \"$HOME/.tokeneconomizer\")
-  (subpath \"$HOME/.cargo\")
-  (subpath \"$HOME/.rustup\")
-  (subpath \"/tmp\")
-  (subpath \"/private/tmp\")
-  (subpath \"/private/var/folders\")$EXTRA_RULES)"
+(allow file-write*"
+for _p in "${WRITE_PATHS[@]}"; do SEATBELT_POLICY+=$'\n'"  (subpath \"$_p\")"; done
+SEATBELT_POLICY+=")"
+for _k in "${PROTECT_PATHS[@]}"; do SEATBELT_POLICY+=$'\n'"(deny file-read* file-write* (subpath \"$_k\"))"; done
+
+# 3b. Diagnostic des blocages (`agent-rc <profil> blocks|why`) : les chemins de la politique sont enregistrés
+# hors de portée d'écriture de l'agent. La consigne (DIAG_HINT=0 pour la désactiver) lui demande de vérifier
+# l'origine d'un échec d'outil, de prévenir l'utilisateur si c'est Seatbelt, et de ne pas contourner la sandbox.
+mkdir -p "$STATE_DIR"
+print -rl -- "home $HOME" "${WRITE_PATHS[@]/#/allow }" "${PROTECT_PATHS[@]/#/protect }" > "$STATE_DIR/policy.paths"
+HINT_FLAG=""
+# La consigne n'est passée que si le premier mot d'AGENT_CMD est claude (option propre à Claude Code).
+if [[ "${DIAG_HINT:-1}" == "1" && "${${${AGENT_CMD:-claude}%% *}:t}" == "claude" ]]; then
+  cat > "$STATE_DIR/hint.txt" <<HINT
+Environnement agent-rc, profil $PROFILE : tu tournes dans une sandbox macOS Seatbelt qui interdit les écritures hors du projet et de quelques dossiers.
+Quand un outil échoue de façon inattendue (« Operation not permitted », écriture refusée, échec sans cause claire), lance \`agent-rc $PROFILE why "<message d'erreur>"\` avant de réessayer.
+- Verdict SEATBELT : préviens l'utilisateur que sa sandbox a bloqué l'opération (opération, chemin, EXTRA_WRITE_PATHS du profil à ajuster si c'est légitime) et ne tente pas de la contourner.
+- Verdict CLAUDE : c'est une erreur d'outil de Claude Code ; corrige l'appel (par exemple, charge le schéma de l'outil avec ToolSearch) et réessaie.
+HINT
+  HINT_FLAG="--append-system-prompt \"\$(cat '$STATE_DIR/hint.txt')\""
+fi
 
 # 4. Launch detached tmux with caffeinate + macOS Seatbelt filesystem restriction
 tmux new -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \
   "export PATH=\"$HOME/.tokeneconomizer/bin:\$PATH\"; \
    export TE_DISABLE='$TE_DISABLE'; \
    source '$PROFILE_FILE'; \
+   if [ -n \"\${AGENT_KEYCHAIN:-}\" ]; then security lock-keychain \"\$AGENT_KEYCHAIN\"; fi; \
    caffeinate -is sandbox-exec -p '$SEATBELT_POLICY' \
-   ${AGENT_CMD:-claude} $RESUME_FLAG --remote-control '$RC_DISPLAY_NAME'; \
+   ${AGENT_CMD:-claude} $RESUME_FLAG --remote-control '$RC_DISPLAY_NAME' $HINT_FLAG; \
    exec zsh"
+trap - EXIT   # le shell tmux reverrouille le coffre lui-même
 
 # 5. Répond automatiquement à la question "Resume / Start a new conversation"
 # (désactivable avec AUTO_RESUME=0 dans le profil). "1. Resume" est présélectionné.

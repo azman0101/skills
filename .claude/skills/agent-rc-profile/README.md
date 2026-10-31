@@ -23,7 +23,7 @@ mkdir -p ~/.local/bin && install -m 755 .claude/skills/agent-rc-profile/scripts/
 ```
 
 Vérifiez que `~/.local/bin` est dans votre `PATH`. `agent-rc` n'a pas de profil par défaut :
-`agent-rc <profil> [start|status|microskills|toolprune|refresh-catalog|restore|bypass]`.
+`agent-rc <profil> [start|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]`.
 
 Rechargez les skills (`/reload-skills`) ou relancez Claude Code.
 
@@ -37,7 +37,7 @@ bash scripts/new-profile.sh mon-projet --project-dir ~/code/mon-projet \
   --secret API_KEY=mon-service --resume-latest --dry-run
 ```
 
-Options : `--session`, `--rc-name`, `--agent-cmd`, `--write-path CHEMIN` (répétable : dossiers supplémentaires en écriture dans la sandbox, par exemple
+Options : `--session`, `--rc-name`, `--agent-cmd`, `--vault NOM`, `--protect-keychain NOM` (trousseau dédié, voir plus bas), `--write-path CHEMIN` (répétable : dossiers supplémentaires en écriture dans la sandbox, par exemple
 les caches d'un outil), `--microskills envfacts|on|off|skip` (défaut `envfacts` :
 active les micro-skills TokenEconomizer du dépôt, désactivés par défaut chez eux, sans appel de
 modèle ; `on` ajoute un modèle toutes les 3 sessions, au coût de la session),
@@ -51,7 +51,13 @@ Sans `--dry-run`, le profil est écrit en `chmod 600` ; un profil existant n'est
 - Les secrets sont lus dans le Keychain au lancement. Le skill ne les lit, ne les demande et ne
   les écrit jamais.
 - La sandbox ne restreint que les **écritures** ; les lectures restent libres. Ce n'est pas une
-  protection contre l'exfiltration.
+  protection contre l'exfiltration. Exception : les trousseaux dédiés déclarés dans un profil.
+- **Coffre dédié.** Le Keychain ne se filtre pas par nom de secret, mais `sandbox-exec` peut interdire
+  la lecture du *fichier* d'un trousseau précis, ce qui bloque `security` même déverrouillé.
+  `scripts/vault.sh init|add|unlock|lock|status` gère un trousseau séparé ; `--vault` y lit les
+  secrets d'un profil (mot de passe demandé à chaque démarrage, reverrouillage après lecture),
+  `--protect-keychain` le cache aux autres profils. Le trousseau de connexion ne peut pas être
+  protégé ainsi : Claude Code y stocke ses identifiants.
 - La télémétrie OTLP est désactivée par défaut. `--log-prompts` envoie le texte des prompts à votre
   collecteur : à n'utiliser qu'avec un collecteur de confiance.
 - `sandbox-exec` est déprécié par Apple mais fonctionnel.
@@ -62,6 +68,7 @@ Sans `--dry-run`, le profil est écrit en `chmod 600` ; un profil existant n'est
 |---|---|
 | `SKILL.md` | Instructions du skill |
 | `scripts/new-profile.sh` | Générateur de profils |
+| `scripts/vault.sh` | Trousseau dédié (coffre) pour les secrets |
 | `scripts/agent-rc` | Lanceur (tmux, sandbox, reprise automatique) |
 | `references/profile-reference.md` | Variables, pièges, dépannage |
 

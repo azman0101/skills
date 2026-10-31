@@ -25,6 +25,13 @@ Usage: new-profile.sh <nom> --project-dir DIR [options]
                         Désactivés par défaut dans TokenEconomizer ; réglage hors du .env.
   --write-path PATH     Chemin supplémentaire en écriture dans la sandbox (répétable), ex: les
                         caches d'un outil (~/.kube/cache). Absolu ou ~/..., sans : ' " \
+  --vault NOM|CHEMIN    Lit les --secret dans un trousseau dédié (voir vault.sh) au lieu du
+                        trousseau de connexion. NOM sans '/' => ~/Library/Keychains/NOM.keychain-db.
+                        Déverrouillé à la demande par agent-rc, reverrouillé après lecture, et
+                        illisible pour l'agent (refus Seatbelt sur le fichier).
+  --protect-keychain NOM|CHEMIN
+                        Interdit aussi à l'agent la lecture de ce trousseau (répétable), ex: un
+                        coffre de secrets que ce profil n'utilise pas.
   --otlp URL            Active la télémétrie OTLP vers URL (collecteur fourni par vous)
   --log-prompts         Avec --otlp : journalise aussi le texte des prompts
   --force               Écrase un profil existant
@@ -42,7 +49,7 @@ NAME="$1"; shift
 [[ "$NAME" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || die "nom invalide '$NAME' (minuscules, chiffres, . _ -)"
 
 PROJECT_DIR=""; SESSION=""; RC_NAME=""; AGENT_CMD="claude"; RESUME=""; RESUME_LATEST=0
-OTLP=""; LOG_PROMPTS=0; FORCE=0; DRY=0; SECRETS=(); WRITE_PATHS=(); MICROSKILLS="envfacts"
+OTLP=""; LOG_PROMPTS=0; FORCE=0; DRY=0; SECRETS=(); WRITE_PATHS=(); VAULT=""; PROTECT=(); MICROSKILLS="envfacts"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -53,6 +60,8 @@ while [[ $# -gt 0 ]]; do
     --resume)        RESUME="${2:?}"; shift 2 ;;
     --resume-latest) RESUME_LATEST=1; shift ;;
     --secret)        SECRETS+=("${2:?}"); shift 2 ;;
+    --vault)         VAULT="${2:?}"; shift 2 ;;
+    --protect-keychain) PROTECT+=("${2:?}"); shift 2 ;;
     --write-path)    WRITE_PATHS+=("${2:?}"); shift 2 ;;
     --microskills)   MICROSKILLS="${2:?}"; shift 2 ;;
     --otlp)          OTLP="${2:?}"; shift 2 ;;
@@ -95,6 +104,18 @@ if (( ${#WRITE_PATHS[@]} )); then
         warn "--write-path $p : zone d'identifiants AWS ; préférez les seuls sous-dossiers de cache nécessaires" ;;
     esac
     WRITE_RESOLVED="${WRITE_RESOLVED:+$WRITE_RESOLVED:}$p"
+  done
+fi
+
+# Trousseaux dédiés : agent-rc interdit leur lecture à l'agent (règle Seatbelt sur le fichier).
+# Le trousseau de connexion ne peut pas l'être : Claude Code y stocke ses propres identifiants.
+resolve_kc() { bash "$(dirname "$0")/vault.sh" --vault "$1" path; }   # contrôles et résolution : vault.sh
+VAULT_PATH=""; PROTECT_RESOLVED=""
+[[ -z "$VAULT" ]] || VAULT_PATH="$(resolve_kc "$VAULT")"
+if (( ${#PROTECT[@]} )); then
+  for k in "${PROTECT[@]}"; do
+    k="$(resolve_kc "$k")"
+    [[ "$k" != "$VAULT_PATH" ]] && PROTECT_RESOLVED="${PROTECT_RESOLVED:+$PROTECT_RESOLVED:}$k"
   done
 fi
 
@@ -149,6 +170,13 @@ if [[ -n "$WRITE_RESOLVED" ]]; then
   add "EXTRA_WRITE_PATHS=$(sq "$WRITE_RESOLVED")"
 fi
 
+if [[ -n "$VAULT_PATH" || -n "$PROTECT_RESOLVED" ]]; then
+  add ""
+  add "# Trousseaux dédiés : lecture interdite à l'agent par la sandbox (voir scripts/vault.sh)"
+  [[ -z "$VAULT_PATH" ]] || add "AGENT_KEYCHAIN=$(sq "$VAULT_PATH")"
+  [[ -z "$PROTECT_RESOLVED" ]] || add "PROTECTED_KEYCHAINS=$(sq "$PROTECT_RESOLVED")"
+fi
+
 if [[ -n "$OTLP" ]]; then
   add ""
   add "# Télémétrie OTLP"
@@ -165,18 +193,29 @@ if (( ${#SECRETS[@]} )); then
   add "# Secrets : lus dans le Keychain, jamais passés en argument de commande."
   add "# Affectation séparée de l'export : si l'entrée manque, set -e interrompt agent-rc"
   add "# au lieu de lancer l'agent avec une variable vide."
+  add "# Ignorés quand agent-rc n'en a pas besoin (status, microskills…)."
+  add 'if [[ -z "${AGENT_SKIP_SECRETS:-}" ]]; then'
+  [[ -z "$VAULT_PATH" || -f "$VAULT_PATH" ]] || warn "coffre introuvable: $VAULT_PATH (créez-le avec scripts/vault.sh init)"
+  kc_arg=""; [[ -z "$VAULT_PATH" ]] || kc_arg=' "$AGENT_KEYCHAIN"'
   for s in "${SECRETS[@]}"; do
     var="${s%%=*}"; rest="${s#*=}"
     [[ "$s" == *=* && -n "$rest" ]] || die "--secret attend VAR=SERVICE[:COMPTE], reçu '$s'"
     [[ "$var" =~ ^[A-Z_][A-Z0-9_]*$ ]] || die "nom de variable invalide: $var"
     service="${rest%%:*}"; account="$USER"; [[ "$rest" == *:* ]] && account="${rest#*:}"
-    if ! security find-generic-password -s "$service" -a "$account" >/dev/null 2>&1; then
-      warn "entrée Keychain introuvable (service='$service', compte='$account'). Créez-la avec :"
-      warn "  security add-generic-password -s '$service' -a '$account' -w   # saisie masquée"
+    if [[ -z "$VAULT_PATH" || -f "$VAULT_PATH" ]] \
+       && ! security find-generic-password -s "$service" -a "$account" ${VAULT_PATH:+"$VAULT_PATH"} >/dev/null 2>&1; then
+      if [[ -n "$VAULT_PATH" ]]; then
+        warn "entrée absente du coffre (service='$service', compte='$account'). Ajoutez-la avec :"
+        warn "  vault.sh --vault '$VAULT' add '$service' '$account'   # saisie masquée"
+      else
+        warn "entrée Keychain introuvable (service='$service', compte='$account'). Créez-la avec :"
+        warn "  security add-generic-password -s '$service' -a '$account' -w   # saisie masquée"
+      fi
     fi
-    add "$var=\"\$(security find-generic-password -s $(sq "$service") -a $(sq "$account") -w)\""
-    add "export $var"
+    add "  $var=\"\$(security find-generic-password -s $(sq "$service") -a $(sq "$account") -w$kc_arg)\""
+    add "  export $var"
   done
+  add "fi"
 fi
 
 if (( DRY )); then printf '%s' "$out"; exit 0; fi

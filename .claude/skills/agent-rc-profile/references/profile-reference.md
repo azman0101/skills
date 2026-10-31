@@ -12,6 +12,8 @@ puis une seconde fois dans le shell tmux.
 | `RC_DISPLAY_NAME` | Nom affiché par `--remote-control` | oui |
 | `AGENT_CMD` | Binaire lancé (défaut `claude`) | non |
 | `RESUME_UUID` | Si renseigné : `--resume UUID` ; vide : `--continue` | non |
+| `AGENT_KEYCHAIN` | Coffre dédié (chemin absolu) d'où sont lus les secrets. `agent-rc` le déverrouille (mot de passe interactif), charge les secrets, le reverrouille, et interdit sa lecture à l'agent | non |
+| `PROTECTED_KEYCHAINS` | Autres trousseaux dédiés (chemins absolus séparés par `:`) dont la lecture est interdite à l'agent | non |
 | `EXTRA_WRITE_PATHS` | Chemins absolus supplémentaires en écriture dans la sandbox, séparés par `:` (sans `'` `"` `\`). Absent ou vide : politique par défaut inchangée | non |
 | `AUTO_RESUME` | `1` (défaut) : valide automatiquement la question de reprise ; `0` : la laisse à l'utilisateur | non |
 | `TE_DISABLE` | `0` TokenEconomizer actif, `1` bypass (posé par l'action `bypass`) | non |
@@ -53,6 +55,23 @@ donc une entrée absente donnerait une variable vide sans erreur, et l'agent dé
 La valeur reste dans l'environnement du processus, pas dans la ligne de commande (`ps aux`).
 Elle est en revanche visible de l'agent lui-même (`env`), ce qui est voulu.
 
+## Coffre dédié (trousseau séparé)
+
+Fonctionnement vérifié sur un trousseau jetable :
+- `security create-keychain` n'ajoute pas le trousseau à la liste de recherche : un
+  `security find-generic-password` sans chemin ne le trouve pas (code 44).
+- Verrouillé, la lecture d'un secret échoue (code 36 sans interface graphique ; avec une session
+  graphique, macOS peut afficher une demande de mot de passe à l'écran). Les noms (service/compte)
+  restent en revanche interrogeables tant que le fichier est lisible.
+- Une règle Seatbelt `(deny file-read* (subpath "<fichier>"))` empêche `security` de lire ce
+  trousseau, **même déverrouillé**, et de lister ses noms : le client lit le fichier lui-même.
+  La même règle sur le trousseau de connexion casserait la lecture des identifiants de Claude Code.
+- Mots de passe et secrets passent par `security -i` (entrée standard), jamais par les arguments.
+
+Les profils récents entourent la lecture des secrets d'un test `AGENT_SKIP_SECRETS` : `agent-rc`
+ne l'active que pour `start` et `bypass`, donc `status`, `microskills`… ne demandent jamais le
+mot de passe du coffre. Un profil ancien sans ce test charge ses secrets à chaque appel.
+
 ## Pièges de construction
 
 - **Quotes dans `PROJECT_DIR`** : le chemin est inséré dans une politique Seatbelt entre `"` puis
@@ -72,6 +91,9 @@ Elle est en revanche visible de l'agent lui-même (`env`), ce qui est voulu.
 |---|---|
 | `Profile not found` | mauvais nom, ou fichier hors de `~/.config/agent-profiles/` |
 | `Session ... already running` | normal : `tmux attach -t <SESSION_NAME>` |
+| `Coffre introuvable` au lancement | `AGENT_KEYCHAIN` pointe vers un fichier absent : `scripts/vault.sh init` |
+| Code 36 au chargement des secrets | coffre verrouillé ou secret absent : relancer `agent-rc` (mot de passe demandé), `vault.sh add` |
+| `PROTECTED_KEYCHAINS: chemin refusé` | chemin relatif, ou contenant `'` `"` `\` |
 | `EXTRA_WRITE_PATHS: chemin refusé` au lancement | chemin relatif, ou contenant `'` `"` `\` ; corriger le profil |
 | L'agent démarre puis `Operation not permitted` à l'écriture | chemin hors liste d'écriture de la sandbox (cache npm/uv/go…) : l'ajouter dans `EXTRA_WRITE_PATHS` (`--write-path`) et redémarrer la session |
 | Code 44 / `could not be found in the keychain` au lancement | entrée Keychain absente (service/compte) |
