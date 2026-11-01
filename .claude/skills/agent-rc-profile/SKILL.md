@@ -127,7 +127,10 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
   `te fold`) et injecte ses faits au démarrage ; une session tmux qui dure des jours n'apprend donc
   rien. `restart` envoie `/exit`, attend la fin de `claude` puis du `fold`, tue la session et relance.
   Il refuse une session active depuis moins de `RESTART_IDLE` (5 min) sans `--force`, et ne se lance
-  pas depuis la session elle-même. Au démarrage, `agent-rc` lance aussi un surveillant
+  pas depuis la session elle-même.
+  Avant d'arrêter la session, il vérifie que la relance réussira (lecture réelle du profil, secrets compris,
+  et chemins de `EXTRA_WRITE_PATHS`) : sinon il s'annule et la session reste intacte. Pas de vérification
+  avec un coffre dédié (déverrouillage au clavier à la relance). Au démarrage, `agent-rc` lance aussi un surveillant
   (`<session>-ttl`) qui relance la session quand elle a plus de `RESTART_TTL` (8h par défaut, `0` =
   désactivé) et qu'elle est inactive ; il s'arrête si la session est arrêtée à la main. Journal :
   `~/.local/state/agent-rc/<profil>/restart.log`. **Limite** : une conversation reprise (`--continue`)
