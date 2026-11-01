@@ -23,7 +23,7 @@ mkdir -p ~/.local/bin && install -m 755 .claude/skills/agent-rc-profile/scripts/
 ```
 
 Vérifiez que `~/.local/bin` est dans votre `PATH`. `agent-rc` n'a pas de profil par défaut :
-`agent-rc <profil> [start|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]`.
+`agent-rc list` affiche les profils et l'état de leur session ; `agent-rc <profil> [start|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]`.
 
 Rechargez les skills (`/reload-skills`) ou relancez Claude Code.
 

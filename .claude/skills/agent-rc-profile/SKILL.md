@@ -77,6 +77,7 @@ Pour le détail des variables et des pièges de la sandbox, lire `references/pro
 | Arrêter | `tmux kill-session -t <SESSION_NAME>` |
 | État TokenEconomizer | `agent-rc <p> status` · `microskills` · `toolprune` |
 | Régler les micro-skills d'un dépôt existant | dans le dépôt : `te config set microskills=on\|envfacts\|off` (effet au prochain hook) |
+| Lister les profils et l'état de leur session (en cours / arrêtée, âge, inactivité, relance auto) | `agent-rc list` (alias `ls`) |
 | Voir l'écran de la session sans s'y attacher (60 lignes, ou N en 3e argument) | `agent-rc <p> logs [N]` |
 | Refus Seatbelt de la session + statistiques (journal `~/.local/state/agent-rc/<p>/blocks.jsonl`) | `agent-rc <p> blocks [durée] [--all] [--total]` (statistiques de la fenêtre ; `--total` : tout le journal) |
 | Un outil a échoué : sandbox ou Claude Code ? | `agent-rc <p> why "<message d'erreur>"` (verdict SEATBELT / CLAUDE / INDETERMINE) |
