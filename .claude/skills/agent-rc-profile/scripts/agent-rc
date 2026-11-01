@@ -616,6 +616,7 @@ fi
 tmux new -d -s "$SESSION_NAME" -c "$PROJECT_DIR" \
   "export PATH=\"$HOME/.tokeneconomizer/bin:\$PATH\"; \
    export TE_DISABLE='$TE_DISABLE'; \
+   export AGENT_RC_PROFILE='$PROFILE'; \
    source '$PROFILE_FILE'; \
    if [ -n \"\${AGENT_KEYCHAIN:-}\" ]; then security lock-keychain \"\$AGENT_KEYCHAIN\"; fi; \
    caffeinate -is sandbox-exec -p '$SEATBELT_POLICY' \

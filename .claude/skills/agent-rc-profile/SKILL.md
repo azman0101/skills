@@ -123,6 +123,12 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
   (`InputValidationError`, permissions, hooks…). « Permission denied » (EACCES) vient des droits
   Unix, pas de Seatbelt. Dans le dossier d'état, seul le journal `blocks.jsonl` est inscriptible
   par l'agent (la politique et la consigne ne le sont pas) : il est indicatif, pas une preuve d'audit.
+- Applications macOS dans la sandbox : un binaire d'application (App Sandbox) ne démarre pas sous
+  `sandbox-exec` (`forbidden-sandbox-reinit`, code 133). Exemple : un `ProxyCommand` ssh comme
+  `Tailscale nc`. `EXTRA_WRITE_PATHS` n'y peut rien. `agent-rc` exporte `AGENT_RC_PROFILE=<profil>`
+  dans la session : une règle `Match host <hôte> exec "test -n \"$AGENT_RC_PROFILE\""` placée avant le
+  `Host` dans `~/.ssh/config` peut alors contourner le binaire (`ProxyCommand none` et `HostName` = IP
+  tailnet) pour l'agent seulement.
 - Redémarrage et TTL : TokenEconomizer n'apprend qu'à la fin d'une session (`SessionEnd` lance un
   `te fold`) et injecte ses faits au démarrage ; une session tmux qui dure des jours n'apprend donc
   rien. `restart` envoie `/exit`, attend la fin de `claude` puis du `fold`, tue la session et relance.
