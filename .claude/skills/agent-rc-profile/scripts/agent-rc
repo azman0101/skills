@@ -64,8 +64,12 @@ fi
 
 # Les profils récents ne lisent leurs secrets que si AGENT_SKIP_SECRETS est vide : status,
 # microskills… n'ont pas à toucher au Keychain. Les secrets sont chargés à l'étape 1b.
+# Les profils anciens n'ont pas cette garde et lisent le Keychain à chaque source : on neutralise `security`
+# le temps de cette première lecture (sans effet sur les profils récents). La vraie lecture a lieu à l'étape 1b.
 AGENT_SKIP_SECRETS=1
+security() { return 0; }
 source "$PROFILE_FILE"
+unfunction security
 unset AGENT_SKIP_SECRETS
 
 # Cible tmux à correspondance exacte : `-t nom` accepte aussi un préfixe (claude-rc-x répondrait pour claude-rc-x-2).
@@ -511,7 +515,18 @@ if [[ -n "${AGENT_KEYCHAIN:-}" ]]; then
   echo "Déverrouillage du coffre: $AGENT_KEYCHAIN"
   security unlock-keychain "$AGENT_KEYCHAIN"
 fi
+# Lecture réelle du profil (secrets compris) : un échec arrête agent-rc, avec une explication.
+TRAPZERR() {
+  local rc=$?
+  (( ZSH_SUBSHELL == 0 )) || return 0   # le piège se déclenche aussi dans $(…) puis dans l'affectation : un seul message
+  case $rc in
+    36) print -u2 -- "agent-rc: lecture du Keychain impossible (code 36 : « User interaction is not allowed »). Déverrouillez le trousseau de connexion puis relancez." ;;
+    44) print -u2 -- "agent-rc: entrée Keychain introuvable (code 44). Vérifiez le service et le compte du profil, ou créez l'entrée avec security add-generic-password." ;;
+    *)  print -u2 -- "agent-rc: une commande du profil a échoué (code $rc)." ;;
+  esac
+}
 source "$PROFILE_FILE"
+unfunction TRAPZERR
 
 # 2. Build resume flag (--resume UUID or fallback to --continue)
 if [[ "${AGENT_FRESH:-0}" == 1 ]]; then
