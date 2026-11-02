@@ -403,6 +403,23 @@ restart_preflight() {
   return 1
 }
 
+# Après une nouvelle conversation, un RESUME_UUID épinglé ferait reprendre l'ancienne à la relance suivante
+# (`--resume <uuid>` prime sur `--continue`) : on le vide dans le profil, en gardant l'ancienne valeur en commentaire.
+clear_resume_pin() {
+  local old tmp line; old="$(profile_var "$PROFILE_FILE" RESUME_UUID)"
+  [[ -n "$old" ]] || return 0
+  tmp="$PROFILE_FILE.tmp.$$"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" =~ '^(export )?RESUME_UUID=' ]]; then
+      print -r -- "RESUME_UUID=\"\"   # vidé par restart --fresh le $(date +%F) (ancien : $old)"
+    else
+      print -r -- "$line"
+    fi
+  done < "$PROFILE_FILE" > "$tmp" && chmod 600 "$tmp" && mv "$tmp" "$PROFILE_FILE" || { rm -f "$tmp"; return 1; }
+  echo "RESUME_UUID vidé dans $PROFILE_FILE (ancien : $old) : les prochaines relances reprendront cette nouvelle conversation."
+  rlog "RESUME_UUID vidé (ancien: $old)"
+}
+
 restart_session() {   # $1 = 1 : nouvelle conversation ; $2 = 1 : même si la session est active
   local fresh="$1" force="$2" idle t
   idle="$(to_seconds "${RESTART_IDLE:-5m}")" || idle=300
@@ -435,7 +452,8 @@ restart_session() {   # $1 = 1 : nouvelle conversation ; $2 = 1 : même si la se
     tmux kill-session -t "$TMUX_TARGET"
   fi
   rlog "redémarrage (nouvelle conversation: $fresh, forcé: ${force:-0})"
-  AGENT_FRESH="$fresh" "$SELF" "$PROFILE" start
+  AGENT_FRESH="$fresh" "$SELF" "$PROFILE" start || return $?
+  [[ "$fresh" != 1 ]] || clear_resume_pin
 }
 
 ttl_watch() {   # tourne dans la session tmux "<session>-ttl", lancée par `start`
@@ -459,7 +477,7 @@ Usage: agent-rc $PROFILE [start|restart|status|logs|blocks|why|microskills|toolp
 Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
 
   agent-rc $PROFILE                    [écriture] démarre la session (tmux + sandbox + Remote Control)
-  agent-rc $PROFILE restart [--fresh] [--force] [écriture] /exit propre, attend le fold TokenEconomizer, relance (TTL auto : ${RESTART_TTL:-8h})
+  agent-rc $PROFILE restart [--fresh] [--force] [écriture] /exit propre, attend le fold TokenEconomizer, relance (--fresh : nouvelle conversation, vide RESUME_UUID) ; TTL auto : ${RESTART_TTL:-8h}
   agent-rc $PROFILE status             [lecture]  ce que TokenEconomizer a appris et fait sur le dépôt
   agent-rc $PROFILE logs [N]           [lecture]  les N dernières lignes (60 par défaut) de l'écran de la session
   agent-rc $PROFILE blocks [durée] [--all] [--total] [lecture+journal] refus Seatbelt de la fenêtre (défaut 1h) + statistiques

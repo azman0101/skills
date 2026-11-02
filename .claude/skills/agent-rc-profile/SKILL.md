@@ -141,7 +141,8 @@ session existe déjà, `start` ne relance rien (verrou `.jsonl`) et affiche les 
   désactivé) et qu'elle est inactive ; il s'arrête si la session est arrêtée à la main. Journal :
   `~/.local/state/agent-rc/<profil>/restart.log`. **Limite** : une conversation reprise (`--continue`)
   garde ses faits d'origine « mot pour mot » (cache du prompt) : seule une nouvelle conversation
-  (`restart --fresh`, ou `RESTART_FRESH=1` pour la relance automatique) reçoit les faits appris, au
+  (`restart --fresh`, ou `RESTART_FRESH=1` pour la relance automatique ; `--fresh` vide aussi
+  `RESUME_UUID` dans le profil, sinon la relance suivante reprendrait l'ancienne conversation épinglée) reçoit les faits appris, au
   prix du contexte. Un profil à coffre dédié n'est pas relancé automatiquement (déverrouillage au clavier).
 - Reprise automatique : `agent-rc` répond à la question « Resume / Start a new conversation »
   (conversation ancienne ou volumineuse) en envoyant Entrée via `tmux send-keys` dès que le texte
