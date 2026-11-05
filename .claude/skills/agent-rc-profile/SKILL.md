@@ -75,7 +75,7 @@ Pour le détail des variables et des pièges de la sandbox, lire `references/pro
 | Démarrer / reprendre | `agent-rc <p>` |
 | Voir la session | `tmux attach -t <SESSION_NAME>` ; détacher : `Ctrl+B` puis `D` |
 | Arrêter | `tmux kill-session -t <SESSION_NAME>` |
-| État TokenEconomizer | `agent-rc <p> status` · `microskills` · `toolprune` |
+| État TokenEconomizer | `agent-rc <p> status` · `microskills` · `toolprune` · `learning` (résumé de l'apprentissage) |
 | Régler les micro-skills d'un dépôt existant | dans le dépôt : `te config set microskills=on\|envfacts\|off` (effet au prochain hook) |
 | Lister les profils et l'état de leur session (en cours / arrêtée, âge, inactivité, relance auto) | `agent-rc list` (alias `ls`) |
 | Voir l'écran de la session sans s'y attacher (60 lignes, ou N en 3e argument) | `agent-rc <p> logs [N]` |
