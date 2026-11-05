@@ -472,7 +472,7 @@ ttl_watch() {   # tourne dans la session tmux "<session>-ttl", lancée par `star
 
 usage() {
   cat <<USAGE
-Usage: agent-rc $PROFILE [start|restart|status|logs|blocks|why|microskills|toolprune|refresh-catalog|restore|bypass]
+Usage: agent-rc $PROFILE [start|restart|status|logs|blocks|why|microskills|toolprune|learning|refresh-catalog|restore|bypass]
 
 Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
 
@@ -484,6 +484,7 @@ Exemples pour ce profil (session tmux : $SESSION_NAME) — copiez-collez :
   agent-rc $PROFILE why "<erreur>"     [lecture+journal] cet échec d'outil vient-il de Seatbelt ou de Claude Code ?
   agent-rc $PROFILE microskills        [lecture]  les faits du dépôt injectés au démarrage
   agent-rc $PROFILE toolprune          [lecture]  outils retirés des sessions et propositions en attente
+  agent-rc $PROFILE learning           [lecture]  résumé de ce que TokenEconomizer a appris (état, faits, outils)
   agent-rc $PROFILE refresh-catalog    [écriture] relit le catalogue d'outils (état TokenEconomizer)
   agent-rc $PROFILE restore            [écriture] rend tous les outils retirés (.claude/settings.local.json)
   agent-rc $PROFILE bypass             [écriture] démarre la session avec TokenEconomizer désactivé
@@ -503,6 +504,15 @@ case "$ACTION" in
     ;;
   status|microskills|toolprune)
     cd "$PROJECT_DIR" && exec te "$ACTION"
+    ;;
+  learning)
+    # Synthèse en lecture seule : te status + microskills + toolprune (tableau des outils réduit à un compte)
+    cd "$PROJECT_DIR" || exit 1
+    te status; echo
+    echo "== Faits (microskills) =="; te microskills; echo
+    echo "== Outils (toolprune) =="
+    te toolprune | awk '/^ +[0-9]+ sessions? +[0-9]+ prompts? /{n++; if (n<=5) print; next} {print} END{if (n>5) printf "     … %d outils inutilisés au total (agent-rc '"$PROFILE"' toolprune pour la liste)\n", n}'
+    exit 0
     ;;
   refresh-catalog)
     cd "$PROJECT_DIR" && exec te toolprune refresh-catalog
